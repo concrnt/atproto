@@ -77,7 +77,7 @@ func setupServer(t *testing.T) (*Server, *fakeResolver, *gorm.DB) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := NewServer(db, repos, nil, "concrnt.example", nil, "test")
+	srv := NewServer(db, repos, nil, "concrnt.example", nil, "test", "con1service")
 	fr := &fakeResolver{table: map[string]string{}}
 	srv.SetResolver(fr)
 	return srv, fr, db

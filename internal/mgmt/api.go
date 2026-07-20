@@ -50,29 +50,31 @@ func (r indigoResolver) ResolveHandle(ctx context.Context, handle string) (strin
 }
 
 type Server struct {
-	db       *gorm.DB
-	repos    *repoman.Manager
-	appview  *appview.Client
-	resolver HandleResolver
-	pdsHost  string
-	relays   []string
-	version  string
+	db          *gorm.DB
+	repos       *repoman.Manager
+	appview     *appview.Client
+	resolver    HandleResolver
+	pdsHost     string
+	relays      []string
+	version     string
+	serviceCcid string
 
 	// OnProfileInit is called after an account goes active so the outbound
 	// layer can push the user's concrnt profile into their new bsky repo.
 	OnProfileInit func(ctx context.Context, ent *store.Entity)
 }
 
-func NewServer(db *gorm.DB, repos *repoman.Manager, av *appview.Client, pdsHost string, relays []string, version string) *Server {
+func NewServer(db *gorm.DB, repos *repoman.Manager, av *appview.Client, pdsHost string, relays []string, version string, serviceCcid string) *Server {
 	base := identity.BaseDirectory{}
 	return &Server{
-		db:       db,
-		repos:    repos,
-		appview:  av,
-		resolver: indigoResolver{dir: &base},
-		pdsHost:  pdsHost,
-		relays:   relays,
-		version:  version,
+		db:          db,
+		repos:       repos,
+		appview:     av,
+		resolver:    indigoResolver{dir: &base},
+		pdsHost:     pdsHost,
+		relays:      relays,
+		version:     version,
+		serviceCcid: serviceCcid,
 	}
 }
 
@@ -127,8 +129,9 @@ func (s *Server) handleCCInfo(c echo.Context) error {
 
 func (s *Server) handleInfo(c echo.Context) error {
 	resp := map[string]any{
-		"pdsHost": s.pdsHost,
-		"version": s.version,
+		"pdsHost":     s.pdsHost,
+		"version":     s.version,
+		"serviceCcid": s.serviceCcid,
 	}
 	if ccid := requester(c); ccid != "" {
 		var ent store.Entity

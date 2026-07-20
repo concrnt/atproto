@@ -136,7 +136,7 @@ func run() error {
 
 	pds.NewServer(db, repos, blobSvc, pdsHost, version).Register(e)
 
-	mgmtSrv := mgmt.NewServer(db, repos, av, pdsHost, cfg.Atproto.Relays, version)
+	mgmtSrv := mgmt.NewServer(db, repos, av, pdsHost, cfg.Atproto.Relays, version, cfg.Concrnt.CCID)
 	mgmtSrv.OnProfileInit = func(ctx context.Context, ent *store.Entity) {
 		if err := daemon.SyncProfile(ctx, ent); err != nil {
 			slog.Error("initial profile sync failed", "ccid", ent.CCID, "error", err)
