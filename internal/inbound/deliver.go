@@ -140,6 +140,23 @@ func (g *Ingester) IngestPost(ctx context.Context, ev *Event, isFollowed bool, b
 	slog.Info("mirrored post", "atUri", uri, "distributes", len(distributes))
 }
 
+// IngestFollow delivers a follow notification to the bridged subject's notify
+// timeline. No follower state is materialized: unfollows are not tracked and
+// the document upserts at a key derived from the (follower, subject) pair.
+func (g *Ingester) IngestFollow(ctx context.Context, ev *Event, subjectDID string) {
+	notify := g.notifyTimelineOfDID(subjectDID)
+	if notify == "" {
+		return
+	}
+	override := g.profileOverride(ctx, ev.DID)
+	doc := toconcrnt.BuildFollowNotifyDoc(g.core.CCID(), ev.DID, subjectDID, override, []string{notify}, createdAt(ev))
+	if _, err := core.Commit(ctx, g.core, doc); err != nil {
+		slog.Error("failed to commit follow notification", "follower", ev.DID, "subject", subjectDID, "error", err)
+		return
+	}
+	slog.Info("follow notification", "follower", ev.DID, "subject", subjectDID)
+}
+
 // IngestRepost mirrors a repost by a followed actor, and/or notifies a
 // bridged author their post was reposted.
 func (g *Ingester) IngestRepost(ctx context.Context, ev *Event, isFollowed, subjectBridged bool) {

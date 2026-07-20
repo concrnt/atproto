@@ -72,6 +72,33 @@ func BuildRerouteDoc(serviceCCID, repostAtURI, targetCcURI string, override *wor
 	return doc
 }
 
+// FollowNotifyKey derives a stable key per (follower, subject) pair so a
+// refollow upserts the same record instead of accumulating documents.
+func FollowNotifyKey(serviceCCID, followerDID, subjectDID string) string {
+	return "cckv://" + serviceCCID + "/" + world.FollowNotifyKeyPrefix + cdid.MakeHash([]byte(followerDID+"->"+subjectDID)).String()
+}
+
+// BuildFollowNotifyDoc notifies a bridged user that a Bluesky account followed
+// them. No follower state is materialized anywhere; this document is the whole
+// representation.
+func BuildFollowNotifyDoc(serviceCCID, followerDID, subjectDID string, override *world.ProfileOverride, distributes []string, createdAt time.Time) concrnt.Document[world.AtprotoFollowNotify] {
+	doc := concrnt.Document[world.AtprotoFollowNotify]{
+		Kind:   "record",
+		Key:    FollowNotifyKey(serviceCCID, followerDID, subjectDID),
+		Schema: world.SchemaAtprotoFollowNotify,
+		Value: world.AtprotoFollowNotify{
+			DID:             followerDID,
+			ProfileOverride: override,
+		},
+		Author:    serviceCCID,
+		CreatedAt: createdAt,
+	}
+	if len(distributes) > 0 {
+		doc.Distributes = &distributes
+	}
+	return doc
+}
+
 // BuildLikeAssociation mirrors a bsky like as an a/like.json association on
 // the target concrnt resource.
 func BuildLikeAssociation(serviceCCID, targetCcURI string, override *world.ProfileOverride, distributes []string, createdAt time.Time) concrnt.Document[world.LikeValue] {

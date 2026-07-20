@@ -20,15 +20,17 @@ const (
 	SchemaDelete    = "https://schema.concrnt.net/delete.json"
 
 	// Schemas introduced by this bridge.
-	SchemaAtprotoRecord = "https://schema.concrnt.world/atproto/record.json"
-	SchemaAtprotoFollow = "https://schema.concrnt.world/atproto/follow.json"
+	SchemaAtprotoRecord       = "https://schema.concrnt.world/atproto/record.json"
+	SchemaAtprotoFollow       = "https://schema.concrnt.world/atproto/follow.json"
+	SchemaAtprotoFollowNotify = "https://schema.concrnt.world/atproto/follow-notify.json"
 )
 
 // Namespace used for keys this bridge writes into concrnt.
 const (
-	InboxTimelineKey = "atproto.concrnt.world/inbox"
-	InboxKeyPrefix   = InboxTimelineKey + "/"
-	FollowsKeyPrefix = "atproto.concrnt.world/follows/"
+	InboxTimelineKey      = "atproto.concrnt.world/inbox"
+	InboxKeyPrefix        = InboxTimelineKey + "/"
+	FollowsKeyPrefix      = "atproto.concrnt.world/follows/"
+	FollowNotifyKeyPrefix = "atproto.concrnt.world/follow-notify/"
 )
 
 // Body-bearing message value shared by markdown/media/reply/reroute schemas.
@@ -74,6 +76,13 @@ type AtprotoRecord struct {
 // their own cckv space to declare a follow of a Bluesky account.
 type AtprotoFollow struct {
 	DID string `json:"did"`
+}
+
+// AtprotoFollowNotify is the value of SchemaAtprotoFollowNotify, delivered to
+// a bridged user's notify timeline when a Bluesky account follows them.
+type AtprotoFollowNotify struct {
+	DID             string           `json:"did"`
+	ProfileOverride *ProfileOverride `json:"profileOverride,omitempty"`
 }
 
 // LikeValue is the value of a/like.json and a/reaction.json associations.

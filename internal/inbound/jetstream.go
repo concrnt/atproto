@@ -34,6 +34,7 @@ var wantedCollections = []string{
 	"app.bsky.feed.post",
 	"app.bsky.feed.like",
 	"app.bsky.feed.repost",
+	"app.bsky.graph.follow",
 }
 
 type Consumer struct {
@@ -238,6 +239,12 @@ func (c *Consumer) handleEvent(ctx context.Context, ev *Event) {
 		case "app.bsky.feed.like":
 			if bridged[didOfATURI(subjectURI(commit.Record))] {
 				c.ingester.IngestLike(ctx, ev)
+			}
+		case "app.bsky.graph.follow":
+			// A follow record's subject is a plain DID, not a StrongRef.
+			subject, _ := commit.Record["subject"].(string)
+			if bridged[subject] {
+				c.ingester.IngestFollow(ctx, ev, subject)
 			}
 		}
 	case OpDelete:

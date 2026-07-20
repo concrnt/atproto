@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -59,6 +60,47 @@ func (c *Client) GetProfile(ctx context.Context, actor string) (*Profile, error)
 		return nil, err
 	}
 	return &p, nil
+}
+
+// GraphPage is one page of an app.bsky.graph.* actor list.
+type GraphPage struct {
+	Profiles []Profile
+	Cursor   string
+}
+
+func (c *Client) graphPage(ctx context.Context, method, listKey, actor string, limit int, cursor string) (*GraphPage, error) {
+	if limit < 1 || limit > 100 {
+		limit = 50
+	}
+	params := url.Values{"actor": {actor}, "limit": {strconv.Itoa(limit)}}
+	if cursor != "" {
+		params.Set("cursor", cursor)
+	}
+	var resp struct {
+		Followers []Profile `json:"followers"`
+		Follows   []Profile `json:"follows"`
+		Cursor    string    `json:"cursor"`
+	}
+	if err := c.get(ctx, method, params, &resp); err != nil {
+		return nil, err
+	}
+	page := &GraphPage{Cursor: resp.Cursor}
+	if listKey == "followers" {
+		page.Profiles = resp.Followers
+	} else {
+		page.Profiles = resp.Follows
+	}
+	return page, nil
+}
+
+// GetFollowers pages through app.bsky.graph.getFollowers for an actor.
+func (c *Client) GetFollowers(ctx context.Context, actor string, limit int, cursor string) (*GraphPage, error) {
+	return c.graphPage(ctx, "app.bsky.graph.getFollowers", "followers", actor, limit, cursor)
+}
+
+// GetFollows pages through app.bsky.graph.getFollows for an actor.
+func (c *Client) GetFollows(ctx context.Context, actor string, limit int, cursor string) (*GraphPage, error) {
+	return c.graphPage(ctx, "app.bsky.graph.getFollows", "follows", actor, limit, cursor)
 }
 
 // GetPosts hydrates up to 25 at-uris into full post views (raw JSON).

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/bluesky-social/indigo/atproto/identity"
@@ -58,6 +59,7 @@ type Server struct {
 	relays      []string
 	version     string
 	serviceCcid string
+	graph       graphCache
 
 	// OnProfileInit is called after an account goes active so the outbound
 	// layer can push the user's concrnt profile into their new bsky repo.
@@ -92,6 +94,7 @@ func (s *Server) Register(e *echo.Echo) {
 	e.GET("/atproto/api/settings", s.handleGetSettings)
 	e.POST("/atproto/api/settings", s.handlePostSettings)
 	e.GET("/atproto/api/following", s.handleFollowing)
+	e.GET("/atproto/api/followers", s.handleFollowers)
 	e.GET("/atproto/api/resolve-actor", s.handleResolveActor)
 	e.GET("/atproto/api/resolve", s.handleResolveRecord)
 }
@@ -121,6 +124,7 @@ func (s *Server) handleCCInfo(c echo.Context) error {
 			ServiceName + ".verify":       "/atproto/api/verify",
 			ServiceName + ".settings":     "/atproto/api/settings",
 			ServiceName + ".following":    "/atproto/api/following",
+			ServiceName + ".followers":    "/atproto/api/followers{?limit,cursor}",
 			ServiceName + ".resolveActor": "/atproto/api/resolve-actor{?target}",
 			ServiceName + ".resolve":      "/atproto/api/resolve{?uri}",
 		},
@@ -315,6 +319,50 @@ func (s *Server) handleFollowing(c echo.Context) error {
 		out = append(out, entry)
 	}
 	return c.JSON(http.StatusOK, map[string]any{"following": out})
+}
+
+// handleFollowers proxies app.bsky.graph.getFollowers for the requester's own
+// bridged DID, behind a short TTL cache. Followers are never materialized
+// locally; the appview is the source of truth.
+func (s *Server) handleFollowers(c echo.Context) error {
+	ent, err := s.entityOfRequester(c)
+	if ent == nil {
+		return err
+	}
+	if ent.DID == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "account has no DID yet"})
+	}
+
+	limit := 50
+	if l, err := strconv.Atoi(c.QueryParam("limit")); err == nil && l >= 1 && l <= 100 {
+		limit = l
+	}
+	cursor := c.QueryParam("cursor")
+
+	key := fmt.Sprintf("%s\x00%s\x00%d", ent.DID, cursor, limit)
+	page := s.graph.get(key)
+	if page == nil {
+		page, err = s.appview.GetFollowers(c.Request().Context(), ent.DID, limit, cursor)
+		if err != nil {
+			return c.JSON(http.StatusBadGateway, map[string]string{"error": "appview query failed"})
+		}
+		s.graph.put(key, page)
+	}
+
+	out := make([]map[string]any, 0, len(page.Profiles))
+	for _, p := range page.Profiles {
+		out = append(out, map[string]any{
+			"did":         p.DID,
+			"handle":      p.Handle,
+			"displayName": p.DisplayName,
+			"avatar":      p.Avatar,
+		})
+	}
+	resp := map[string]any{"followers": out}
+	if page.Cursor != "" {
+		resp["cursor"] = page.Cursor
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 // handleResolveActor resolves a handle or DID into a profile preview, for

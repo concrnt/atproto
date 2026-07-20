@@ -1,8 +1,11 @@
 package toconcrnt
 
 import (
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/concrnt/atproto/internal/world"
 )
 
 // The expected hash was produced by the TypeScript implementation
@@ -54,6 +57,42 @@ func TestSubjectExtraction(t *testing.T) {
 	}
 	if SubjectURI(record) != "at://did:plc:x/app.bsky.feed.post/5" || SubjectCID(record) != "bafyfoo" {
 		t.Fatal("subject extraction failed")
+	}
+}
+
+func TestFollowNotifyKeyDeterminism(t *testing.T) {
+	a := FollowNotifyKey("con1svc", "did:plc:follower", "did:plc:subject")
+	b := FollowNotifyKey("con1svc", "did:plc:follower", "did:plc:subject")
+	if a != b {
+		t.Errorf("same pair must derive the same key: %s vs %s", a, b)
+	}
+	if !strings.HasPrefix(a, "cckv://con1svc/atproto.concrnt.world/follow-notify/") {
+		t.Errorf("unexpected key namespace: %s", a)
+	}
+	if c := FollowNotifyKey("con1svc", "did:plc:other", "did:plc:subject"); c == a {
+		t.Errorf("different follower must derive a different key")
+	}
+	if c := FollowNotifyKey("con1svc", "did:plc:follower", "did:plc:other"); c == a {
+		t.Errorf("different subject must derive a different key")
+	}
+}
+
+func TestBuildFollowNotifyDoc(t *testing.T) {
+	now := time.Now()
+	override := &world.ProfileOverride{Username: "alice"}
+	doc := BuildFollowNotifyDoc("con1svc", "did:plc:follower", "did:plc:subject", override,
+		[]string{"cckv://con1u/concrnt.world/profiles/main/notify-timeline"}, now)
+	if doc.Kind != "record" || doc.Schema != world.SchemaAtprotoFollowNotify {
+		t.Errorf("bad doc %+v", doc)
+	}
+	if doc.Key != FollowNotifyKey("con1svc", "did:plc:follower", "did:plc:subject") {
+		t.Errorf("key mismatch: %s", doc.Key)
+	}
+	if doc.Value.DID != "did:plc:follower" || doc.Value.ProfileOverride != override {
+		t.Errorf("bad value %+v", doc.Value)
+	}
+	if doc.Author != "con1svc" || doc.Distributes == nil || len(*doc.Distributes) != 1 {
+		t.Errorf("bad author/distributes %+v", doc)
 	}
 }
 
