@@ -160,11 +160,12 @@ func (m *Manager) EmitAccount(ctx context.Context, did string, active bool, stat
 	})
 }
 
-// CreateAccount provisions a fully-functional bridged account: entity row,
-// signing key, did:plc registration, repo init. It returns the stored entity.
-// Event ordering matters: the DID must resolve on the PLC directory before
-// any firehose event mentions it, or relays will reject the account.
-func (m *Manager) CreateAccount(ctx context.Context, ccid, handle string) (*store.Entity, error) {
+// CreatePending provisions a bridged account up to (but not including)
+// activation: a signing key, a did:plc that claims `handle` as its
+// alsoKnownAs, and a pending entity row. No repo, firehose event, or relay
+// crawl happens yet — the handle is unverified, so the account must not be
+// visible to the network until Activate.
+func (m *Manager) CreatePending(ctx context.Context, ccid, handle string) (*store.Entity, error) {
 	var existing store.Entity
 	if err := m.db.Where("ccid = ?", ccid).First(&existing).Error; err == nil {
 		return nil, fmt.Errorf("ccid %s is already bridged as %s", ccid, existing.DID)
@@ -192,7 +193,7 @@ func (m *Manager) CreateAccount(ctx context.Context, ccid, handle string) (*stor
 		DID:          did,
 		Handle:       handle,
 		PLCLastOpCID: opCID,
-		Status:       "active",
+		Status:       "pending",
 		Enabled:      true,
 	}
 	if err := m.db.Create(&ent).Error; err != nil {
@@ -202,26 +203,42 @@ func (m *Manager) CreateAccount(ctx context.Context, ccid, handle string) (*stor
 	m.didByUid[ent.Uid] = did
 	m.mu.Unlock()
 
-	if err := m.plc.WaitForRegistration(ctx, did); err != nil {
-		return nil, err
-	}
-
-	if err := m.EmitIdentity(ctx, did, handle); err != nil {
-		return nil, err
-	}
-	if err := m.EmitAccount(ctx, did, true, nil); err != nil {
-		return nil, err
-	}
-	if err := m.mgr.InitNewActor(ctx, ent.Uid, handle, did, "", "", ""); err != nil {
-		return nil, fmt.Errorf("repo init failed: %w", err)
-	}
-
 	return &ent, nil
 }
 
-// InitActor initializes an empty repo (with a bare profile) for an entity
-// that already exists in the store. CreateAccount calls this implicitly;
-// it is exposed for flows that provision the entity row separately.
+// Activate turns a pending account live: it waits for the DID to resolve on
+// the PLC directory, then emits #identity → #account → the initial #commit
+// (repo init) in that order. Relays validate the DID before accepting
+// commits, so the ordering is load-bearing.
+func (m *Manager) Activate(ctx context.Context, did string) error {
+	ent, err := m.entityByDID(did)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.didByUid[ent.Uid] = did
+	m.mu.Unlock()
+
+	if err := m.plc.WaitForRegistration(ctx, did); err != nil {
+		return err
+	}
+	if err := m.EmitIdentity(ctx, did, ent.Handle); err != nil {
+		return err
+	}
+	if err := m.EmitAccount(ctx, did, true, nil); err != nil {
+		return err
+	}
+	if err := m.mgr.InitNewActor(ctx, ent.Uid, ent.Handle, did, "", "", ""); err != nil {
+		return fmt.Errorf("repo init failed: %w", err)
+	}
+
+	return m.db.Model(&store.Entity{}).Where("uid = ?", ent.Uid).
+		Update("status", "active").Error
+}
+
+// InitActor initializes just the repo (bare profile) for an entity that
+// already exists, without PLC registration or firehose account events.
+// Used where the PLC/handle lifecycle is handled separately (e.g. tests).
 func (m *Manager) InitActor(ctx context.Context, did, handle string) error {
 	ent, err := m.entityByDID(did)
 	if err != nil {

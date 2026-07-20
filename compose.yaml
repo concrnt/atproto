@@ -21,9 +21,10 @@ services:
     depends_on:
       - postgres
       - redis
+    # Single port; in production this is reached only through the concrnt
+    # gateway, never exposed directly.
     ports:
       - "127.0.0.1:8010:8010"
-      - "127.0.0.1:8011:8011"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - bridge-data:/data

@@ -105,12 +105,18 @@ func TestAccountLifecycleAndRepo(t *testing.T) {
 	}
 	defer cancel()
 
-	ent, err := m.CreateAccount(ctx, "con1testccid", "alice.test.example")
+	ent, err := m.CreatePending(ctx, "con1testccid", "alice.test.example")
 	if err != nil {
-		t.Fatalf("CreateAccount: %v", err)
+		t.Fatalf("CreatePending: %v", err)
 	}
 	if !strings.HasPrefix(ent.DID, "did:plc:") {
 		t.Fatalf("unexpected did %q", ent.DID)
+	}
+	if ent.Status != "pending" {
+		t.Fatalf("expected pending status, got %q", ent.Status)
+	}
+	if err := m.Activate(ctx, ent.DID); err != nil {
+		t.Fatalf("Activate: %v", err)
 	}
 
 	// Write a post.

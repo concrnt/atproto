@@ -8,12 +8,11 @@ import (
 )
 
 type Server struct {
-	// Port serves /cc-info and the management API; the concrnt gateway
-	// proxies to it, so it must not be exposed to the internet directly.
+	// Port serves everything: /cc-info, the management API, and the public
+	// PDS face (/xrpc/*, firehose, well-known). The concrnt gateway proxies
+	// all of it, so the bridge must not be exposed to the internet directly
+	// (the management API trusts the gateway's cc-requester header).
 	Port int `yaml:"port"`
-	// PDSPort serves the public PDS face (/xrpc/*, firehose, well-known);
-	// the pdsHost (and its wildcard subdomains) must route here.
-	PDSPort int `yaml:"pdsPort"`
 }
 
 type Database struct {
@@ -39,9 +38,6 @@ type Appview struct {
 }
 
 type Atproto struct {
-	// PDSHost is the public hostname the bridge masquerades as a PDS on.
-	// Handles are minted as subdomains of it: <name>.<PDSHost>
-	PDSHost                  string   `yaml:"pdsHost"`
 	PLCDirectory             string   `yaml:"plcDirectory"`
 	Relays                   []string `yaml:"relays"`
 	Jetstream                string   `yaml:"jetstream"`
@@ -84,9 +80,6 @@ func Load(path string) (*Config, error) {
 	if c.Server.Port == 0 {
 		c.Server.Port = 8010
 	}
-	if c.Server.PDSPort == 0 {
-		c.Server.PDSPort = 8011
-	}
 	if c.Atproto.PLCDirectory == "" {
 		c.Atproto.PLCDirectory = "https://plc.directory"
 	}
@@ -114,9 +107,6 @@ func Load(path string) (*Config, error) {
 
 	if c.Concrnt.CCID == "" || c.Concrnt.Domain == "" || c.Concrnt.PrivateKey == "" {
 		return nil, fmt.Errorf("concrnt.ccid, concrnt.domain and concrnt.privateKey are required")
-	}
-	if c.Atproto.PDSHost == "" {
-		return nil, fmt.Errorf("atproto.pdsHost is required")
 	}
 
 	return &c, nil

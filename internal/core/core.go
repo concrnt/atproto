@@ -25,6 +25,7 @@ type Service struct {
 	Client     *client.Client
 	ccid       string
 	domain     string
+	fqdn       string
 	privateKey string
 	http       *http.Client
 }
@@ -46,15 +47,23 @@ func NewService(ccid, domain, privateKey string) *Service {
 		if err != nil {
 			slog.Warn("failed to resolve concrnt domain from override url; resolution may not work", "url", domain, "error", err)
 			s.Client = client.New(domain)
+			s.fqdn = domain
 			return s
 		}
 		s.Client = client.New(fqdn)
 		s.Client.AddHostRemapping(fqdn, domain)
+		s.fqdn = fqdn
 	} else {
 		s.Client = client.New(domain)
+		s.fqdn = domain
 	}
 	return s
 }
+
+// FQDN is the concrnt server's canonical domain (from its well-known). This
+// is the public origin the gateway serves on, so it doubles as the bridge's
+// PDS host: the atproto serviceEndpoint and the relay crawl hostname.
+func (s *Service) FQDN() string { return s.fqdn }
 
 func fetchWellKnownDomain(baseURL string) (string, error) {
 	resp, err := http.Get(baseURL + "/.well-known/concrnt")

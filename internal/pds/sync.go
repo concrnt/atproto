@@ -71,8 +71,10 @@ func (s *Server) handleListRepos(c echo.Context) error {
 		}
 	}
 
+	// Only active accounts have an initialized repo; pending ones (awaiting
+	// handle verification) must not appear to relays as crawlable.
 	var ents []store.Entity
-	if err := s.db.Where("uid > ? AND did <> ''", afterUid).Order("uid").Limit(limit).Find(&ents).Error; err != nil {
+	if err := s.db.Where("uid > ? AND did <> '' AND status = ?", afterUid, "active").Order("uid").Limit(limit).Find(&ents).Error; err != nil {
 		return xrpcError(c, http.StatusInternalServerError, "InternalError", "query failed")
 	}
 

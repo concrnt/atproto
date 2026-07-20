@@ -33,6 +33,26 @@ concrnt (v2) と Bluesky / atproto を双方向に接続するブリッジです
 300グラフェン超過時は切り詰めて `…` を付け、元投稿へのリンクを
 `embed.external` に載せます。
 
+## アカウント登録(持ち込みドメイン + 2段階検証)
+
+ハンドルはサーバーが発番せず、ユーザーが**自分で管理するドメイン**を持ち込みます。
+DID発行前にDNSレコードは書けないため、登録は2段階です:
+
+1. `POST /atproto/api/setup {handle: "alice.example.com"}` → DID を発行し、
+   その DID が `at://alice.example.com` を alsoKnownAs として主張する
+   `status: pending` のアカウントを作ります。この時点では repo 初期化・
+   firehose イベント・relay クロールは**行いません**。レスポンスに設定すべき
+   レコードが入ります:
+   - DNS TXT: `_atproto.alice.example.com` = `did=<発行されたDID>`(推奨)
+   - または HTTPS: `https://alice.example.com/.well-known/atproto-did` が DID を返す
+     (ドメインを concrnt サーバーに向けている場合、ブリッジが自動で応答します)
+2. ユーザーが上記いずれかを設定 → `POST /atproto/api/verify` → ハンドルが
+   その DID に解決できることを確認し、成功時にアカウントを active 化
+   (repo 初期化 → #identity → #account → プロフィール同期 → requestCrawl)。
+
+PDS の serviceEndpoint は concrnt サーバーの FQDN(= ゲートウェイの公開オリジン)で、
+専用ドメインもワイルドカード DNS/TLS も不要です。
+
 ## フォロー
 
 concrnt ユーザーが Bluesky ユーザーをフォローする操作は、ユーザー自身の
@@ -56,21 +76,21 @@ document の削除がアンフォローです。handle→DID の解決は
 - Postgres(ブリッジ専用DB)
 - concrnt core と**同一の** Redis(イベント購読)
 - 永続ボリューム(`dataDir`: carstore / blobs / firehoseイベントログ)
-- **専用ドメイン + ワイルドカードDNS/TLS**: `pdsHost`(例 `atp.example.net`)と
-  `*.atp.example.net` を pdsPort(既定8011)に直接ルーティングします。
-  DID document の serviceEndpoint は origin しか書けないため、
-  concrnt ゲートウェイのパスプロキシは経由できません。
+- **専用ドメインは不要**。全経路(公開 PDS `/xrpc` 含む)を concrnt ゲートウェイ
+  経由でプロキシします。PDS の serviceEndpoint は concrnt サーバーの FQDN
+  そのものになるため、ワイルドカード DNS/TLS も要りません。
 
-### リスナーは2系統
+### 単一リスナー(すべてゲートウェイ経由)
 
-| ポート | 用途 | 公開範囲 |
-|---|---|---|
-| 8010 (`server.port`) | `/cc-info`, `/atproto/api/*` | concrnt ゲートウェイからのみ(直接公開しないこと。cc-requesterヘッダを信頼するため) |
-| 8011 (`server.pdsPort`) | `/xrpc/*`, firehose, `/.well-known/atproto-did` | インターネット(pdsHost + ワイルドカード) |
+ブリッジは 1 ポート(既定 8010)で `/cc-info`・`/atproto/api/*`・`/xrpc/*`・
+firehose・`/.well-known/atproto-did` をすべて配信します。**このポートは直接
+公開せず**、必ず concrnt ゲートウェイ経由でアクセスさせてください
+(管理 API はゲートウェイが付与する cc-requester ヘッダを信頼するため)。
 
 ### concrnt core への登録
 
-core の config.yaml:
+管理 API(認証あり)と公開 PDS 面(認証なし)は `noAuth` が異なるため、
+サービスエントリを 2 つに分けます(同じ host:port を指す):
 
 ```yaml
 services:
@@ -79,7 +99,23 @@ services:
     port: 8010
     paths: ["/atproto"]
     preservePath: true
+  - name: world.concrnt.atproto.pds
+    host: atproto-bridge
+    port: 8010
+    paths: ["/xrpc", "/.well-known/atproto-did"]
+    preservePath: true
+    noAuth: true
 ```
+
+> **前提**: concrnt 本体の `internal/present/rest/proxy.go` に、プロキシ
+> ハンドラ冒頭で `cc-requester` / `cc-requester-tag` ヘッダを常に `Del` する
+> 修正が必要です(未認証パス経由でのヘッダ偽装防止)。この修正は本ブリッジと
+> 同じ変更セットに含まれます。
+>
+> **firehose(WebSocket)**は concrnt ゲートウェイの ReverseProxy を通ります。
+> Go の ReverseProxy は Upgrade を透過しますが、本体は WS プロキシの実績が
+> ないため、デプロイ時に `wss://<concrnt>/xrpc/com.atproto.sync.subscribeRepos`
+> の疎通を必ず確認してください。
 
 ### 設定
 
@@ -90,7 +126,8 @@ services:
 
 | エンドポイント | 説明 |
 |---|---|
-| `POST /atproto/api/setup {handle}` | ブリッジ有効化: 鍵生成 → did:plc 登録 → repo 初期化 → プロフィール同期。handle は `<name>.<pdsHost>` になります |
+| `POST /atproto/api/setup {handle}` | 登録1段階目: 持ち込みドメインで did:plc 発番、status=pending。検証手順を返す |
+| `POST /atproto/api/verify` | 登録2段階目: handle の DNS/well-known 検証成功で active 化(repo 初期化・crawl) |
 | `GET/POST /atproto/api/settings` | enabled / listenTimelines |
 | `GET /atproto/api/info` | ブリッジ情報 + 自分のエンティティ状態 |
 | `GET /atproto/api/following` | フォロー中の Bluesky アカウント一覧 |

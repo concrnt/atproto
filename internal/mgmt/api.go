@@ -8,14 +8,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"regexp"
 	"strings"
-	"time"
 
 	"github.com/bluesky-social/indigo/atproto/identity"
 	"github.com/bluesky-social/indigo/atproto/syntax"
 	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 
@@ -27,49 +24,74 @@ import (
 
 const ServiceName = "world.concrnt.atproto"
 
+// HandleResolver resolves an atproto handle to its DID. Abstracted so tests
+// can inject a fake without touching DNS.
+type HandleResolver interface {
+	ResolveHandle(ctx context.Context, handle string) (did string, err error)
+}
+
+// indigoResolver adapts indigo's identity directory. It is uncached: handle
+// verification must see the DNS TXT the user just set, not a stale/negative
+// cache entry.
+type indigoResolver struct {
+	dir identity.Directory
+}
+
+func (r indigoResolver) ResolveHandle(ctx context.Context, handle string) (string, error) {
+	h, err := syntax.ParseHandle(handle)
+	if err != nil {
+		return "", err
+	}
+	ident, err := r.dir.LookupHandle(ctx, h)
+	if err != nil {
+		return "", err
+	}
+	return ident.DID.String(), nil
+}
+
 type Server struct {
 	db       *gorm.DB
 	repos    *repoman.Manager
 	appview  *appview.Client
-	resolver *identity.CacheDirectory
+	resolver HandleResolver
 	pdsHost  string
 	relays   []string
 	version  string
 
-	// OnProfileInit is called after setup so the outbound layer can push the
-	// user's concrnt profile into their new bsky repo.
+	// OnProfileInit is called after an account goes active so the outbound
+	// layer can push the user's concrnt profile into their new bsky repo.
 	OnProfileInit func(ctx context.Context, ent *store.Entity)
 }
 
 func NewServer(db *gorm.DB, repos *repoman.Manager, av *appview.Client, pdsHost string, relays []string, version string) *Server {
 	base := identity.BaseDirectory{}
-	cache := identity.NewCacheDirectory(&base, 10000, time.Hour, 5*time.Minute, 5*time.Minute)
 	return &Server{
 		db:       db,
 		repos:    repos,
 		appview:  av,
-		resolver: cache,
+		resolver: indigoResolver{dir: &base},
 		pdsHost:  pdsHost,
 		relays:   relays,
 		version:  version,
 	}
 }
 
-func (s *Server) Echo() *echo.Echo {
-	e := echo.New()
-	e.HideBanner = true
-	e.Use(middleware.Recover())
+// SetResolver overrides the handle resolver (used by tests).
+func (s *Server) SetResolver(r HandleResolver) { s.resolver = r }
 
+// Register mounts the management routes onto e. These trust the gateway's
+// cc-requester header for authentication, so the bridge listener must only
+// be reachable through the concrnt gateway.
+func (s *Server) Register(e *echo.Echo) {
 	e.GET("/cc-info", s.handleCCInfo)
 	e.GET("/atproto/api/info", s.handleInfo)
 	e.POST("/atproto/api/setup", s.handleSetup)
+	e.POST("/atproto/api/verify", s.handleVerify)
 	e.GET("/atproto/api/settings", s.handleGetSettings)
 	e.POST("/atproto/api/settings", s.handlePostSettings)
 	e.GET("/atproto/api/following", s.handleFollowing)
 	e.GET("/atproto/api/resolve-actor", s.handleResolveActor)
 	e.GET("/atproto/api/resolve", s.handleResolveRecord)
-
-	return e
 }
 
 // requester extracts the authenticated CCID propagated by the concrnt gateway.
@@ -94,6 +116,7 @@ func (s *Server) handleCCInfo(c echo.Context) error {
 		"endpoints": map[string]string{
 			ServiceName + ".info":         "/atproto/api/info",
 			ServiceName + ".setup":        "/atproto/api/setup",
+			ServiceName + ".verify":       "/atproto/api/verify",
 			ServiceName + ".settings":     "/atproto/api/settings",
 			ServiceName + ".following":    "/atproto/api/following",
 			ServiceName + ".resolveActor": "/atproto/api/resolve-actor{?target}",
@@ -104,9 +127,8 @@ func (s *Server) handleCCInfo(c echo.Context) error {
 
 func (s *Server) handleInfo(c echo.Context) error {
 	resp := map[string]any{
-		"pdsHost":      s.pdsHost,
-		"handleDomain": s.pdsHost,
-		"version":      s.version,
+		"pdsHost": s.pdsHost,
+		"version": s.version,
 	}
 	if ccid := requester(c); ccid != "" {
 		var ent store.Entity
@@ -122,8 +144,11 @@ func (s *Server) handleInfo(c echo.Context) error {
 	return c.JSON(http.StatusOK, resp)
 }
 
-var handleLocalRe = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
-
+// handleSetup starts bridging: it mints a DID that claims the user's own
+// domain as its handle, but leaves the account pending. The user must prove
+// domain ownership (a `_atproto.<handle>` DNS TXT record pointing at the DID,
+// or an HTTPS well-known) before /atproto/api/verify activates it. No repo,
+// firehose event, or relay crawl happens until then.
 func (s *Server) handleSetup(c echo.Context) error {
 	ccid := requester(c)
 	if ccid == "" {
@@ -136,13 +161,13 @@ func (s *Server) handleSetup(c echo.Context) error {
 	if err := c.Bind(&body); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid body"})
 	}
-	local := strings.ToLower(strings.TrimSpace(body.Handle))
-	if !handleLocalRe.MatchString(local) {
+	handle := strings.ToLower(strings.TrimSpace(body.Handle))
+	handle = strings.TrimPrefix(handle, "@")
+	if _, err := syntax.ParseHandle(handle); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "handle must be 1-63 chars of lowercase letters, digits and hyphens",
+			"error": "handle must be a domain you control (e.g. alice.example.com)",
 		})
 	}
-	handle := local + "." + s.pdsHost
 
 	var count int64
 	s.db.Model(&store.Entity{}).Where("handle = ?", handle).Count(&count)
@@ -150,8 +175,59 @@ func (s *Server) handleSetup(c echo.Context) error {
 		return c.JSON(http.StatusConflict, map[string]string{"error": "handle already taken"})
 	}
 
-	ent, err := s.repos.CreateAccount(c.Request().Context(), ccid, handle)
+	ent, err := s.repos.CreatePending(c.Request().Context(), ccid, handle)
 	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	return c.JSON(http.StatusOK, map[string]any{
+		"did":    ent.DID,
+		"handle": ent.Handle,
+		"status": ent.Status,
+		"verification": map[string]any{
+			"dns": map[string]string{
+				"name":  "_atproto." + ent.Handle,
+				"type":  "TXT",
+				"value": "did=" + ent.DID,
+			},
+			"https": map[string]string{
+				"url":  "https://" + ent.Handle + "/.well-known/atproto-did",
+				"body": ent.DID,
+			},
+			"next": "set one of the records above, then POST /atproto/api/verify",
+		},
+	})
+}
+
+// handleVerify confirms the user's handle now resolves to their DID and, on
+// success, activates the account: repo init, #identity/#account firehose
+// events, profile sync, and a relay crawl request.
+func (s *Server) handleVerify(c echo.Context) error {
+	ent, herr := s.entityOfRequester(c)
+	if ent == nil {
+		return herr
+	}
+	if ent.Status == "active" {
+		return c.JSON(http.StatusOK, map[string]any{"did": ent.DID, "handle": ent.Handle, "status": "active"})
+	}
+
+	ctx := c.Request().Context()
+	resolved, err := s.resolver.ResolveHandle(ctx, ent.Handle)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]any{
+			"error":  "handle_not_resolvable",
+			"detail": fmt.Sprintf("could not resolve %s: %v", ent.Handle, err),
+			"hint":   "add the _atproto DNS TXT record (or well-known) and retry; DNS may take a few minutes",
+		})
+	}
+	if resolved != ent.DID {
+		return c.JSON(http.StatusBadRequest, map[string]any{
+			"error":  "did_mismatch",
+			"detail": fmt.Sprintf("%s resolves to %s, expected %s", ent.Handle, resolved, ent.DID),
+		})
+	}
+
+	if err := s.repos.Activate(ctx, ent.DID); err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 
@@ -160,10 +236,7 @@ func (s *Server) handleSetup(c echo.Context) error {
 		go s.OnProfileInit(context.Background(), ent)
 	}
 
-	return c.JSON(http.StatusOK, map[string]any{
-		"did":    ent.DID,
-		"handle": ent.Handle,
-	})
+	return c.JSON(http.StatusOK, map[string]any{"did": ent.DID, "handle": ent.Handle, "status": "active"})
 }
 
 func (s *Server) entityOfRequester(c echo.Context) (*store.Entity, error) {
@@ -253,15 +326,11 @@ func (s *Server) handleResolveActor(c echo.Context) error {
 	if strings.HasPrefix(target, "did:") {
 		did = target
 	} else {
-		h, err := syntax.ParseHandle(target)
-		if err != nil {
-			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid handle"})
-		}
-		ident, err := s.resolver.LookupHandle(ctx, h)
+		resolved, err := s.resolver.ResolveHandle(ctx, target)
 		if err != nil {
 			return c.JSON(http.StatusNotFound, map[string]string{"error": fmt.Sprintf("failed to resolve %s", target)})
 		}
-		did = ident.DID.String()
+		did = resolved
 	}
 
 	profile, err := s.appview.GetProfile(ctx, did)

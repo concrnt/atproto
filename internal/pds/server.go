@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
 	"gorm.io/gorm"
 
 	"github.com/concrnt/atproto/internal/blobs"
@@ -22,7 +21,7 @@ type Server struct {
 	db      *gorm.DB
 	repos   *repoman.Manager
 	blobs   *blobs.Service
-	pdsHost string
+	pdsHost string // concrnt FQDN; the atproto serviceEndpoint origin
 	version string
 }
 
@@ -30,11 +29,10 @@ func NewServer(db *gorm.DB, repos *repoman.Manager, blobSvc *blobs.Service, pdsH
 	return &Server{db: db, repos: repos, blobs: blobSvc, pdsHost: pdsHost, version: version}
 }
 
-func (s *Server) Echo() *echo.Echo {
-	e := echo.New()
-	e.HideBanner = true
-	e.Use(middleware.Recover())
-
+// Register mounts the public PDS routes onto e. The whole surface is
+// unauthenticated public data; it shares the listener with the management
+// API and both are reached only through the concrnt gateway.
+func (s *Server) Register(e *echo.Echo) {
 	e.GET("/xrpc/_health", s.handleHealth)
 	e.GET("/xrpc/com.atproto.sync.subscribeRepos", s.handleSubscribeRepos)
 	e.GET("/xrpc/com.atproto.sync.getRepo", s.handleGetRepo)
@@ -51,8 +49,6 @@ func (s *Server) Echo() *echo.Echo {
 	// treat this as a read-only host rather than a broken one.
 	e.GET("/xrpc/*", s.handleNotImplemented)
 	e.POST("/xrpc/*", s.handleNotImplemented)
-
-	return e
 }
 
 func xrpcError(c echo.Context, status int, name, msg string) error {
@@ -76,20 +72,19 @@ func (s *Server) handleDescribeServer(c echo.Context) error {
 	})
 }
 
-// handleWellKnownDID resolves a handle (the Host header, one of our
-// subdomains) to its DID.
+// handleWellKnownDID resolves a handle (the Host header) to its DID. Handles
+// are user-owned domains, so this only answers when a user has pointed their
+// domain (CNAME/ALIAS) at the concrnt server; the DNS TXT method needs no
+// server support. Matches on the exact, active handle only.
 func (s *Server) handleWellKnownDID(c echo.Context) error {
 	host := c.Request().Host
 	if h, _, ok := strings.Cut(host, ":"); ok || h != "" {
 		host = h
 	}
 	host = strings.ToLower(host)
-	if !strings.HasSuffix(host, "."+s.pdsHost) && host != s.pdsHost {
-		return c.String(http.StatusNotFound, "unknown handle domain")
-	}
 
 	var ent store.Entity
-	if err := s.db.Where("handle = ? AND enabled = ?", host, true).First(&ent).Error; err != nil {
+	if err := s.db.Where("handle = ? AND status = ?", host, "active").First(&ent).Error; err != nil {
 		return c.String(http.StatusNotFound, "no such handle")
 	}
 	return c.String(http.StatusOK, ent.DID)

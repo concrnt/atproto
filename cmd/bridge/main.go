@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/bluesky-social/indigo/atproto/atcrypto"
+	"github.com/labstack/echo/v4"
+	echomiddleware "github.com/labstack/echo/v4/middleware"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -85,11 +87,22 @@ func run() error {
 		return err
 	}
 
+	// Core connection first: its resolved FQDN is the public origin the
+	// gateway serves on, which doubles as the bridge's PDS host (the atproto
+	// serviceEndpoint and the relay crawl hostname).
+	blobSvc := blobs.NewService(db, cfg.Atproto.DataDir)
+	coreSvc := core.NewService(cfg.Concrnt.CCID, cfg.Concrnt.Domain, cfg.Concrnt.PrivateKey)
+	av := appview.NewClient(cfg.Atproto.Appview.URL)
+	pdsHost := coreSvc.FQDN()
+	if pdsHost == "" {
+		return fmt.Errorf("could not determine concrnt FQDN; check concrnt.domain")
+	}
+
 	rotationKey, err := parseRotationKey(cfg.Atproto.MasterRotationKey)
 	if err != nil {
 		return err
 	}
-	plcSvc := plcm.NewService(cfg.Atproto.PLCDirectory, rotationKey, cfg.Atproto.PDSHost)
+	plcSvc := plcm.NewService(cfg.Atproto.PLCDirectory, rotationKey, pdsHost)
 
 	repos, err := repoman.New(db, cfg.Atproto.DataDir, ks, plcSvc,
 		time.Duration(cfg.Atproto.FirehoseRetentionHours)*time.Hour)
@@ -97,10 +110,6 @@ func run() error {
 		return err
 	}
 	go repos.RunGC(ctx)
-
-	blobSvc := blobs.NewService(db, cfg.Atproto.DataDir)
-	coreSvc := core.NewService(cfg.Concrnt.CCID, cfg.Concrnt.Domain, cfg.Concrnt.PrivateKey)
-	av := appview.NewClient(cfg.Atproto.Appview.URL)
 
 	reload := time.Duration(cfg.Atproto.EntityReloadIntervalSecs) * time.Second
 
@@ -118,29 +127,28 @@ func run() error {
 	consumer := inbound.NewConsumer(db, cfg.Atproto.Jetstream, ingester, reload)
 	go consumer.Run(ctx)
 
-	// Public PDS listener.
-	pdsSrv := pds.NewServer(db, repos, blobSvc, cfg.Atproto.PDSHost, version)
-	go func() {
-		addr := fmt.Sprintf(":%d", cfg.Server.PDSPort)
-		slog.Info("pds listener starting", "addr", addr, "host", cfg.Atproto.PDSHost)
-		if err := pdsSrv.Echo().Start(addr); err != nil {
-			slog.Error("pds listener stopped", "error", err)
-			cancel()
-		}
-	}()
+	// A single listener carries everything; the concrnt gateway proxies both
+	// the public PDS routes (/xrpc, well-known) and the management API
+	// (/cc-info, /atproto/api). The bridge must not be exposed directly.
+	e := echo.New()
+	e.HideBanner = true
+	e.Use(echomiddleware.Recover())
 
-	// Management listener (behind the concrnt gateway).
-	mgmtSrv := mgmt.NewServer(db, repos, av, cfg.Atproto.PDSHost, cfg.Atproto.Relays, version)
+	pds.NewServer(db, repos, blobSvc, pdsHost, version).Register(e)
+
+	mgmtSrv := mgmt.NewServer(db, repos, av, pdsHost, cfg.Atproto.Relays, version)
 	mgmtSrv.OnProfileInit = func(ctx context.Context, ent *store.Entity) {
 		if err := daemon.SyncProfile(ctx, ent); err != nil {
 			slog.Error("initial profile sync failed", "ccid", ent.CCID, "error", err)
 		}
 	}
+	mgmtSrv.Register(e)
+
 	go func() {
 		addr := fmt.Sprintf(":%d", cfg.Server.Port)
-		slog.Info("management listener starting", "addr", addr)
-		if err := mgmtSrv.Echo().Start(addr); err != nil {
-			slog.Error("management listener stopped", "error", err)
+		slog.Info("bridge listener starting", "addr", addr, "pdsHost", pdsHost)
+		if err := e.Start(addr); err != nil {
+			slog.Error("listener stopped", "error", err)
 			cancel()
 		}
 	}()
@@ -148,9 +156,9 @@ func run() error {
 	// Let relays know we exist (idempotent, only useful once we host repos).
 	if !cfg.Atproto.DisableRelayNotify {
 		var count int64
-		db.Model(&store.Entity{}).Where("did <> ''").Count(&count)
+		db.Model(&store.Entity{}).Where("did <> '' AND status = ?", "active").Count(&count)
 		if count > 0 {
-			go relay.RequestCrawl(ctx, cfg.Atproto.Relays, cfg.Atproto.PDSHost)
+			go relay.RequestCrawl(ctx, cfg.Atproto.Relays, pdsHost)
 		}
 	}
 
