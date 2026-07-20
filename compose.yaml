@@ -1,0 +1,33 @@
+# Development stack: postgres + redis + the bridge.
+# In production the bridge shares the concrnt core's redis instead.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: atproto
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    ports:
+      - "127.0.0.1:6380:6379"
+
+  bridge:
+    build: .
+    depends_on:
+      - postgres
+      - redis
+    ports:
+      - "127.0.0.1:8010:8010"
+      - "127.0.0.1:8011:8011"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - bridge-data:/data
+
+volumes:
+  pg-data:
+  bridge-data:

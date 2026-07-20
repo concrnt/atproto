@@ -1,0 +1,41 @@
+server:
+  port: 8010     # management API + /cc-info (reached only via the concrnt gateway)
+  pdsPort: 8011  # public PDS face: /xrpc/*, firehose, /.well-known/atproto-did
+
+database:
+  url: postgres://postgres:postgres@localhost:5432/atproto
+
+redis:
+  # Must be the SAME redis instance the concrnt core uses (events are
+  # consumed via PSUBSCRIBE).
+  url: redis://localhost:6379
+
+concrnt:
+  ccid: <service account CCID (con1...)>
+  domain: concrnt.example.com   # or http://localhost:8000 for a devnet
+  privateKey: <service account master key, 64-char hex>
+  # Permalink template used as the external embed when a post exceeds
+  # Bluesky's 300-grapheme limit. {uri} is replaced with the cckv uri.
+  postUrlTemplate: "https://world.concrnt.net/post?uri={uri}"
+
+atproto:
+  # Public hostname of the masqueraded PDS. Handles are minted as
+  # <name>.<pdsHost>, so this needs:
+  #   - DNS A/AAAA for pdsHost AND *.pdsHost pointing at pdsPort's ingress
+  #   - a wildcard TLS certificate (e.g. Let's Encrypt DNS-01)
+  # Do NOT route this through the concrnt gateway; DID documents may only
+  # reference an origin (no path prefix).
+  pdsHost: atp.example.net
+  plcDirectory: https://plc.directory
+  relays:
+    - https://bsky.network
+  jetstream: jetstream2.us-east.bsky.network
+  appview:
+    url: https://public.api.bsky.app
+  dataDir: /data                     # carstore shards, blobs, firehose event log
+  masterRotationKey: <K256 private key, multibase or hex; PLC rotation key for ALL bridged DIDs — keep safe>
+  keyEncryptionKey: <32-byte hex; encrypts per-account signing keys at rest>
+  # firehoseRetentionHours: 72
+  # actorCacheTtlMinutes: 60
+  # entityReloadIntervalSeconds: 60
+  # disableRelayNotify: false
