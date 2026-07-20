@@ -128,7 +128,7 @@ func run() error {
 	go consumer.Run(ctx)
 
 	// A single listener carries everything; the concrnt gateway proxies both
-	// the public PDS routes (/xrpc, well-known) and the management API
+	// the public PDS routes (/xrpc) and the management API
 	// (/cc-info, /atproto/api). The bridge must not be exposed directly.
 	e := echo.New()
 	e.HideBanner = true

@@ -1,13 +1,14 @@
 // Package pds implements the public face of the masqueraded PDS: the sync
-// XRPC endpoints, the subscribeRepos firehose, and handle resolution.
-// Everything here is unauthenticated public data; the management API lives in
-// package mgmt on a separate listener.
+// XRPC endpoints and the subscribeRepos firehose. Everything here is
+// unauthenticated public data; the management API lives in package mgmt.
+// Handle resolution is not served here: handles are user-owned domains, so
+// the DNS TXT record (or a well-known file on the user's own web server) is
+// the user's responsibility.
 package pds
 
 import (
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/labstack/echo/v4"
 	"gorm.io/gorm"
@@ -43,7 +44,6 @@ func (s *Server) Register(e *echo.Echo) {
 	e.GET("/xrpc/com.atproto.sync.getBlob", s.handleGetBlob)
 	e.GET("/xrpc/com.atproto.sync.listBlobs", s.handleListBlobs)
 	e.GET("/xrpc/com.atproto.server.describeServer", s.handleDescribeServer)
-	e.GET("/.well-known/atproto-did", s.handleWellKnownDID)
 
 	// Any other XRPC method: standard "not implemented" error, so crawlers
 	// treat this as a read-only host rather than a broken one.
@@ -70,24 +70,6 @@ func (s *Server) handleDescribeServer(c echo.Context) error {
 		"availableUserDomains": []string{},
 		"inviteCodeRequired":   true,
 	})
-}
-
-// handleWellKnownDID resolves a handle (the Host header) to its DID. Handles
-// are user-owned domains, so this only answers when a user has pointed their
-// domain (CNAME/ALIAS) at the concrnt server; the DNS TXT method needs no
-// server support. Matches on the exact, active handle only.
-func (s *Server) handleWellKnownDID(c echo.Context) error {
-	host := c.Request().Host
-	if h, _, ok := strings.Cut(host, ":"); ok || h != "" {
-		host = h
-	}
-	host = strings.ToLower(host)
-
-	var ent store.Entity
-	if err := s.db.Where("handle = ? AND status = ?", host, "active").First(&ent).Error; err != nil {
-		return c.String(http.StatusNotFound, "no such handle")
-	}
-	return c.String(http.StatusOK, ent.DID)
 }
 
 func (s *Server) entityByDID(c echo.Context) (*store.Entity, error) {

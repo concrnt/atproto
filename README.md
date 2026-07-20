@@ -44,8 +44,9 @@ DID発行前にDNSレコードは書けないため、登録は2段階です:
    firehose イベント・relay クロールは**行いません**。レスポンスに設定すべき
    レコードが入ります:
    - DNS TXT: `_atproto.alice.example.com` = `did=<発行されたDID>`(推奨)
-   - または HTTPS: `https://alice.example.com/.well-known/atproto-did` が DID を返す
-     (ドメインを concrnt サーバーに向けている場合、ブリッジが自動で応答します)
+   - または HTTPS: ユーザー自身のWebサーバーで
+     `https://alice.example.com/.well-known/atproto-did` が DID を plain text で
+     返すようにする(ブリッジ側の関与はありません)
 2. ユーザーが上記いずれかを設定 → `POST /atproto/api/verify` → ハンドルが
    その DID に解決できることを確認し、成功時にアカウントを active 化
    (repo 初期化 → #identity → #account → プロフィール同期 → requestCrawl)。
@@ -83,9 +84,10 @@ document の削除がアンフォローです。handle→DID の解決は
 ### 単一リスナー(すべてゲートウェイ経由)
 
 ブリッジは 1 ポート(既定 8010)で `/cc-info`・`/atproto/api/*`・`/xrpc/*`・
-firehose・`/.well-known/atproto-did` をすべて配信します。**このポートは直接
-公開せず**、必ず concrnt ゲートウェイ経由でアクセスさせてください
-(管理 API はゲートウェイが付与する cc-requester ヘッダを信頼するため)。
+firehose をすべて配信します。**このポートは直接公開せず**、必ず concrnt
+ゲートウェイ経由でアクセスさせてください(管理 API はゲートウェイが付与する
+cc-requester ヘッダを信頼するため)。handle 解決はユーザーのドメイン側で
+完結するため、ブリッジは `/.well-known/atproto-did` を配信しません。
 
 ### concrnt core への登録
 
@@ -102,7 +104,7 @@ services:
   - name: world.concrnt.atproto.pds
     host: atproto-bridge
     port: 8010
-    paths: ["/xrpc", "/.well-known/atproto-did"]
+    paths: ["/xrpc"]
     preservePath: true
     noAuth: true
 ```

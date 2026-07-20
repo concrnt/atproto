@@ -190,11 +190,13 @@ func (s *Server) handleSetup(c echo.Context) error {
 				"type":  "TXT",
 				"value": "did=" + ent.DID,
 			},
+			// Alternative for users who run a web server on the handle
+			// domain: serve the DID as plain text at this URL themselves.
 			"https": map[string]string{
 				"url":  "https://" + ent.Handle + "/.well-known/atproto-did",
 				"body": ent.DID,
 			},
-			"next": "set one of the records above, then POST /atproto/api/verify",
+			"next": "publish one of the records above on your domain, then POST /atproto/api/verify",
 		},
 	})
 }

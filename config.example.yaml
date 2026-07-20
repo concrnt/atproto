@@ -1,7 +1,7 @@
 server:
   # Single listener carrying everything: /cc-info, management API, and the
-  # public PDS face (/xrpc/*, firehose, /.well-known/atproto-did). The
-  # concrnt gateway proxies all of it — do NOT expose this port directly.
+  # public PDS face (/xrpc/*, firehose). The concrnt gateway proxies all of
+  # it — do NOT expose this port directly.
   port: 8010
 
 database:
@@ -23,10 +23,8 @@ concrnt:
 atproto:
   # The PDS serviceEndpoint is the concrnt server's own FQDN (resolved from
   # its well-known); /xrpc is proxied by the gateway. No separate PDS domain
-  # or wildcard DNS/TLS is needed. Register the bridge in the concrnt
-  # config's `services:` with:
-  #   paths: ["/atproto", "/xrpc", "/.well-known/atproto-did"]
-  #   preservePath: true
+  # or wildcard DNS/TLS is needed. See README for the `services:` entries to
+  # add to the concrnt config (/atproto with auth, /xrpc with noAuth).
   plcDirectory: https://plc.directory
   relays:
     - https://bsky.network
