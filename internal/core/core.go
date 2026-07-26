@@ -18,6 +18,7 @@ import (
 
 	concrnt "github.com/concrnt/concrnt"
 	"github.com/concrnt/concrnt/client"
+	"github.com/concrnt/concrnt/impl/interop"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -166,8 +167,8 @@ func GetDocument[T any](ctx context.Context, s *Service, uri string) (*concrnt.D
 }
 
 // Events subscribes to all concrnt core events via the shared Redis instance
-// (PSUBSCRIBE *; channel name = resource URI) and emits them on the returned
-// channel until ctx is done.
+// (PSUBSCRIBE cc-event:*; channel name = prefix + resource URI, stripped before
+// emit) and emits them on the returned channel until ctx is done.
 func Events(ctx context.Context, redisURL string) (<-chan ChannelEvent, error) {
 	opts, err := redis.ParseURL(redisURL)
 	if err != nil {
@@ -178,7 +179,7 @@ func Events(ctx context.Context, redisURL string) (<-chan ChannelEvent, error) {
 		return nil, fmt.Errorf("redis ping failed: %w", err)
 	}
 
-	sub := rdb.PSubscribe(ctx, "*")
+	sub := rdb.PSubscribe(ctx, interop.EventChannelPrefix+"*")
 	out := make(chan ChannelEvent, 256)
 
 	go func() {
@@ -200,7 +201,7 @@ func Events(ctx context.Context, redisURL string) (<-chan ChannelEvent, error) {
 					continue
 				}
 				select {
-				case out <- ChannelEvent{Channel: msg.Channel, Event: ev}:
+				case out <- ChannelEvent{Channel: strings.TrimPrefix(msg.Channel, interop.EventChannelPrefix), Event: ev}:
 				case <-ctx.Done():
 					return
 				}

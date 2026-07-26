@@ -50,7 +50,7 @@ func TestDevnetFollowNotifyDedup(t *testing.T) {
 		if err != nil {
 			t.Fatalf("timeline query failed: %v", err)
 		}
-		return len(docs)
+		return len(docs.Items)
 	}
 	// Distribution into the timeline is asynchronous on the server; poll
 	// until the expected count appears (or times out).
