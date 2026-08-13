@@ -4,7 +4,7 @@ go 1.26.4
 
 require (
 	github.com/bluesky-social/indigo v0.0.0-20260629160527-dfe5578fd537
-	github.com/concrnt/concrnt v1.10.11
+	github.com/concrnt/concrnt v1.10.23
 	github.com/did-method-plc/go-didplc v0.2.2
 	github.com/glebarez/sqlite v1.11.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674

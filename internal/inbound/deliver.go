@@ -90,6 +90,10 @@ func (g *Ingester) profileOverride(ctx context.Context, did string) *world.Profi
 
 // followerInboxes returns the inbox timelines of every bridged user
 // following did.
+//
+// TODO: with enough bridged followers of one actor (~400) the resulting
+// distributes list pushes the signed document past the server's 32KiB
+// document limit and the whole commit fails; needs batched commits.
 func (g *Ingester) followerInboxes(did string) []string {
 	var follows []store.Follow
 	if err := g.db.Where("subject_did = ?", did).Find(&follows).Error; err != nil {

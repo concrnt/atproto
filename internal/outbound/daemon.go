@@ -7,6 +7,7 @@ package outbound
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -163,10 +164,22 @@ func (d *Daemon) dispatch(ctx context.Context, ev core.ChannelEvent) {
 	}
 }
 
+// errNotPublic marks a document the server flagged as not anonymously
+// readable; mirroring to bsky is a public act, so it must be skipped.
+var errNotPublic = errors.New("document is not public")
+
 // resolveEventDocument returns the document for uri, preferring the signed
 // copy embedded in the event over a fetch.
 func (d *Daemon) resolveEventDocument(ctx context.Context, ev concrnt.Event, uri string) (*Doc, error) {
 	if sd, ok := ev.References[uri]; ok {
+		// The Redis feed is the server-internal view and carries documents an
+		// anonymous reader may not see, flagged via isPublic (nil = unevaluated,
+		// fail closed). A non-public verdict is the server's own policy result,
+		// so don't fall back to the fetch below — it is anonymous and would
+		// only be refused anyway.
+		if sd.IsPublic == nil || !*sd.IsPublic {
+			return nil, errNotPublic
+		}
 		var doc Doc
 		if err := json.Unmarshal([]byte(sd.Document), &doc); err == nil {
 			return &doc, nil
@@ -180,7 +193,9 @@ func (d *Daemon) handleTimelineEvent(ctx context.Context, entity *store.Entity, 
 	case "created":
 		doc, err := d.resolveEventDocument(ctx, ev, channel)
 		if err != nil {
-			slog.Error("failed to resolve timeline document", "channel", channel, "error", err)
+			if !errors.Is(err, errNotPublic) {
+				slog.Error("failed to resolve timeline document", "channel", channel, "error", err)
+			}
 			return
 		}
 		cckv := doc.Key
@@ -200,6 +215,10 @@ func (d *Daemon) handleTimelineEvent(ctx context.Context, entity *store.Entity, 
 			cckv = ref.Href
 			if sd, ok := ev.References[channel]; ok {
 				if inner, ok := sd.References[cckv]; ok {
+					// The nested original carries its own isPublic verdict.
+					if inner.IsPublic == nil || !*inner.IsPublic {
+						return
+					}
 					var innerDoc Doc
 					if err := json.Unmarshal([]byte(inner.Document), &innerDoc); err == nil {
 						doc = &innerDoc
@@ -536,7 +555,9 @@ func (d *Daemon) handleAssociationEvent(ctx context.Context, ev concrnt.Event) {
 
 	assoc, err := d.resolveEventDocument(ctx, ev, ccfs)
 	if err != nil {
-		slog.Error("failed to resolve association", "uri", ccfs, "error", err)
+		if !errors.Is(err, errNotPublic) {
+			slog.Error("failed to resolve association", "uri", ccfs, "error", err)
+		}
 		return
 	}
 	if assoc.Schema != world.SchemaLike && assoc.Schema != world.SchemaReaction {

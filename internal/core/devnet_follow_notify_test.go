@@ -2,8 +2,10 @@ package core_test
 
 // Devnet E2E for follow notifications: documents the dedup semantics the
 // bridge relies on. A byte-identical re-commit (jetstream rewind replay) must
-// not duplicate the notify-timeline entry, while a refollow (same key, newer
-// createdAt → new documentID) must produce a new entry.
+// not duplicate the notify-timeline entry. A refollow (same key, newer
+// createdAt → new documentID) upserts the record and — since distribution
+// keys are derived from the href — replaces the timeline entry in place, so
+// it must not re-notify either.
 //
 //	DEVNET_E2E=1 DEVNET_URL=http://localhost:8000 \
 //	DEVNET_CCID=con1... DEVNET_PRIVKEY=<hex> go test ./internal/core/
@@ -40,7 +42,11 @@ func TestDevnetFollowNotifyDedup(t *testing.T) {
 	ctx := context.Background()
 	svc := core.NewService(ccid, url, privkey)
 
-	notify := toconcrnt.NotifyTimeline(ccid)
+	// A throwaway destination instead of the real notify timeline: the real
+	// one carries a restrict-readers policy, which distributions inherit as a
+	// virtual parent, so an unauthenticated client (all this bridge has)
+	// could not observe the entries under test.
+	notify := fmt.Sprintf("cckv://%s/atproto.concrnt.world/e2e-notify-%d", ccid, time.Now().Unix())
 	countEntries := func() int {
 		docs, err := svc.Client.Query(ctx, ccid, client.QueryParams{
 			Prefix: notify + "/",
@@ -86,13 +92,14 @@ func TestDevnetFollowNotifyDedup(t *testing.T) {
 	time.Sleep(2 * time.Second) // give a would-be duplicate time to appear
 	waitForEntries(baseline+1, "replay must not duplicate")
 
-	// Refollow: same deterministic key, newer createdAt → record upserts but
-	// a fresh timeline entry appears (one notification per follow event).
+	// Refollow: same deterministic key, newer createdAt → record upserts and
+	// the timeline entry (keyed by hash of the href) is replaced, not added.
 	refollow := toconcrnt.BuildFollowNotifyDoc(ccid, followerDID, ccid, override, []string{notify}, createdAt.Add(time.Second))
 	if _, err := core.Commit(ctx, svc, refollow); err != nil {
 		t.Fatalf("refollow commit failed: %v", err)
 	}
-	waitForEntries(baseline+2, "refollow should add an entry")
+	time.Sleep(2 * time.Second) // give a would-be duplicate time to appear
+	waitForEntries(baseline+1, "refollow must not re-notify")
 
 	// The record itself upserted at one deterministic key.
 	key := toconcrnt.FollowNotifyKey(ccid, followerDID, ccid)
