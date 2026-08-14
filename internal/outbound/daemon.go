@@ -40,11 +40,16 @@ type Daemon struct {
 
 	reloadInterval time.Duration
 
+	settings *SettingsStore
+
 	mu       sync.RWMutex
 	entities []store.Entity
 	// ccfs URIs of likes we exported; filters the firehose of unrelated
 	// "deleted" events without hitting the DB for each one.
 	outboundLikes map[string]bool
+	// ccids whose follow documents have been reconciled against at_follows;
+	// entries are only set on success so failures retry on the next reload.
+	reconciled map[string]bool
 }
 
 func NewDaemon(db *gorm.DB, coreSvc *core.Service, repos *repoman.Manager, blobSvc *blobs.Service, postURLTemplate string, reloadInterval time.Duration) *Daemon {
@@ -55,7 +60,9 @@ func NewDaemon(db *gorm.DB, coreSvc *core.Service, repos *repoman.Manager, blobS
 		blobs:          blobSvc,
 		postURL:        postURLTemplate,
 		reloadInterval: reloadInterval,
+		settings:       NewSettingsStore(coreSvc),
 		outboundLikes:  map[string]bool{},
+		reconciled:     map[string]bool{},
 	}
 }
 
@@ -81,16 +88,63 @@ func (d *Daemon) reload() {
 	d.mu.Unlock()
 }
 
+// syncStores brings the per-entity stores in line with the cckv truth: loads
+// missing settings records, follows the enabled flag into the DB cache column
+// (pds/mgmt read it synchronously), and reconciles follow documents against
+// at_follows. All failures are logged and retried on the next reload tick.
+// Entities are re-fetched here rather than snapshotted from d.entities so the
+// slice elements are never shared with the event loop.
+func (d *Daemon) syncStores(ctx context.Context) {
+	var ents []store.Entity
+	if err := d.db.Find(&ents).Error; err != nil {
+		slog.Error("failed to load entities for store sync", "error", err)
+		return
+	}
+	for i := range ents {
+		ent := &ents[i]
+		if err := d.settings.EnsureLoaded(ctx, ent.CCID); err != nil {
+			slog.Warn("failed to load settings record", "ccid", ent.CCID, "error", err)
+			continue
+		}
+		_, enabled := d.settings.Get(ent.CCID)
+		if ent.Enabled != enabled {
+			if err := d.db.Model(&store.Entity{}).Where("uid = ?", ent.Uid).Update("enabled", enabled).Error; err != nil {
+				slog.Error("failed to sync enabled flag", "ccid", ent.CCID, "error", err)
+				continue
+			}
+			ent.Enabled = enabled
+		}
+		if enabled && ent.DID != "" && ent.Status == "active" {
+			d.ensureFollowsReconciled(ctx, ent)
+		}
+	}
+}
+
+// syncEnabledColumn follows a settings change into at_entities.enabled, which
+// pds and mgmt read synchronously from the DB. Gating in this daemon reads
+// the settings store directly, so the in-memory entity is left alone.
+func (d *Daemon) syncEnabledColumn(entity *store.Entity) {
+	_, enabled := d.settings.Get(entity.CCID)
+	if err := d.db.Model(&store.Entity{}).Where("uid = ?", entity.Uid).Update("enabled", enabled).Error; err != nil {
+		slog.Error("failed to sync enabled flag", "ccid", entity.CCID, "error", err)
+	}
+}
+
 // Run consumes events until ctx is done.
 func (d *Daemon) Run(ctx context.Context, events <-chan core.ChannelEvent) {
 	d.reload()
 	go func() {
+		// Settings loads and follow reconciliation talk to the network, so
+		// they run here rather than ahead of the event loop; events applied
+		// concurrently are idempotent against the reconcile.
+		d.syncStores(ctx)
 		ticker := time.NewTicker(d.reloadInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
 				d.reload()
+				d.syncStores(ctx)
 			case <-ctx.Done():
 				return
 			}
@@ -128,11 +182,20 @@ func (d *Daemon) dispatch(ctx context.Context, ev core.ChannelEvent) {
 
 	for i := range entities {
 		entity := &entities[i]
-		if !entity.Enabled || entity.DID == "" {
+
+		// Settings events must be seen even for disabled entities — the
+		// record is what re-enables them.
+		if channel == settingsKey(entity.CCID) {
+			d.settings.ApplyEvent(ctx, entity.CCID, ev.Event)
+			d.syncEnabledColumn(entity)
 			continue
 		}
 
-		timelines := []string(entity.ListenTimelines)
+		timelines, enabled := d.settings.Get(entity.CCID)
+		if !enabled || entity.DID == "" {
+			continue
+		}
+
 		if len(timelines) == 0 {
 			timelines = []string{fmt.Sprintf("cckv://%s/concrnt.world/profiles/main/home-timeline", entity.CCID)}
 		}
@@ -510,40 +573,61 @@ func (d *Daemon) handleFollowEvent(ctx context.Context, entity *store.Entity, ch
 		if err := json.Unmarshal(doc.Value, &follow); err != nil || !strings.HasPrefix(follow.DID, "did:") {
 			return
 		}
-
-		var count int64
-		d.db.Model(&store.Follow{}).Where("ccid = ? AND subject_did = ?", entity.CCID, follow.DID).Count(&count)
-		if count > 0 {
-			return
-		}
-
-		rec := tobsky.BuildFollow(follow.DID, doc.CreatedAt)
-		atURI, cid, err := d.repos.CreateRecord(ctx, entity.DID, "app.bsky.graph.follow", rec)
-		if err != nil {
+		if err := d.applyFollow(ctx, entity, follow.DID, doc.Key, doc.CreatedAt); err != nil {
 			slog.Error("failed to create follow record", "did", follow.DID, "error", err)
-			return
 		}
-		rkey := atURI[strings.LastIndex(atURI, "/")+1:]
-		d.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&store.Follow{
-			CCID:       entity.CCID,
-			SubjectDID: follow.DID,
-			FollowRkey: rkey,
-		})
-		d.saveURIMap(atURI, doc.Key, entity.DID, cid, "outbound-follow", nil)
-		slog.Info("followed", "ccid", entity.CCID, "subject", follow.DID)
 
 	case "deleted":
 		var ref store.URIMap
 		if err := d.db.Where("cc_uri = ? AND ref_type = ?", ev.URI, "outbound-follow").First(&ref).Error; err != nil {
 			return
 		}
-		if err := d.repos.DeleteRecord(ctx, entity.DID, ref.Collection, ref.Rkey); err != nil {
-			slog.Error("failed to delete follow record", "atUri", ref.AtURI, "error", err)
+		var follow store.Follow
+		if err := d.db.Where("ccid = ? AND follow_rkey = ?", entity.CCID, ref.Rkey).First(&follow).Error; err != nil {
+			follow = store.Follow{CCID: entity.CCID, FollowRkey: ref.Rkey}
 		}
-		d.db.Where("ccid = ? AND follow_rkey = ?", entity.CCID, ref.Rkey).Delete(&store.Follow{})
-		d.db.Delete(&ref)
-		slog.Info("unfollowed", "ccid", entity.CCID, "atUri", ref.AtURI)
+		d.removeFollow(ctx, entity, follow)
 	}
+}
+
+// applyFollow mirrors one validated follow (of subject did, declared by the
+// cckv record at key) into the user's repo and cache rows. Shared by the
+// event path and the reconcile sweep; already-known subjects are a no-op.
+func (d *Daemon) applyFollow(ctx context.Context, entity *store.Entity, did, key string, createdAt time.Time) error {
+	var count int64
+	d.db.Model(&store.Follow{}).Where("ccid = ? AND subject_did = ?", entity.CCID, did).Count(&count)
+	if count > 0 {
+		return nil
+	}
+
+	rec := tobsky.BuildFollow(did, createdAt)
+	atURI, cid, err := d.repos.CreateRecord(ctx, entity.DID, "app.bsky.graph.follow", rec)
+	if err != nil {
+		return err
+	}
+	rkey := atURI[strings.LastIndex(atURI, "/")+1:]
+	d.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&store.Follow{
+		CCID:       entity.CCID,
+		SubjectDID: did,
+		FollowRkey: rkey,
+	})
+	d.saveURIMap(atURI, key, entity.DID, cid, "outbound-follow", nil)
+	slog.Info("followed", "ccid", entity.CCID, "subject", did)
+	return nil
+}
+
+// removeFollow deletes the repo record and cache rows for one follow. The
+// cckv record may already be gone (reconcile after an offline unfollow), so
+// the URIMap row is matched by rkey rather than cc_uri.
+func (d *Daemon) removeFollow(ctx context.Context, entity *store.Entity, follow store.Follow) {
+	if follow.FollowRkey != "" {
+		if err := d.repos.DeleteRecord(ctx, entity.DID, "app.bsky.graph.follow", follow.FollowRkey); err != nil {
+			slog.Error("failed to delete follow record", "ccid", entity.CCID, "rkey", follow.FollowRkey, "error", err)
+		}
+	}
+	d.db.Where("ccid = ? AND follow_rkey = ?", entity.CCID, follow.FollowRkey).Delete(&store.Follow{})
+	d.db.Where("ref_type = ? AND did = ? AND rkey = ?", "outbound-follow", entity.DID, follow.FollowRkey).Delete(&store.URIMap{})
+	slog.Info("unfollowed", "ccid", entity.CCID, "subject", follow.SubjectDID)
 }
 
 // handleAssociationEvent exports likes/reactions on mirrored bsky posts.
@@ -568,7 +652,7 @@ func (d *Daemon) handleAssociationEvent(ctx context.Context, ev concrnt.Event) {
 	if err := d.db.Where("ccid = ?", assoc.Author).First(&liker).Error; err != nil {
 		return // liker is not bridged
 	}
-	if !liker.Enabled {
+	if _, enabled := d.settings.Get(liker.CCID); !enabled {
 		return
 	}
 

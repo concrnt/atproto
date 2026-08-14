@@ -14,7 +14,6 @@ import (
 	"github.com/bluesky-social/indigo/atproto/identity"
 	"github.com/bluesky-social/indigo/atproto/syntax"
 	"github.com/labstack/echo/v4"
-	"gorm.io/datatypes"
 	"gorm.io/gorm"
 
 	"github.com/concrnt/atproto/internal/appview"
@@ -91,8 +90,6 @@ func (s *Server) Register(e *echo.Echo) {
 	e.GET("/atproto/api/info", s.handleInfo)
 	e.POST("/atproto/api/setup", s.handleSetup)
 	e.POST("/atproto/api/verify", s.handleVerify)
-	e.GET("/atproto/api/settings", s.handleGetSettings)
-	e.POST("/atproto/api/settings", s.handlePostSettings)
 	e.GET("/atproto/api/following", s.handleFollowing)
 	e.GET("/atproto/api/followers", s.handleFollowers)
 	e.GET("/atproto/api/resolve-actor", s.handleResolveActor)
@@ -122,7 +119,6 @@ func (s *Server) handleCCInfo(c echo.Context) error {
 			ServiceName + ".info":         "/atproto/api/info",
 			ServiceName + ".setup":        "/atproto/api/setup",
 			ServiceName + ".verify":       "/atproto/api/verify",
-			ServiceName + ".settings":     "/atproto/api/settings",
 			ServiceName + ".following":    "/atproto/api/following",
 			ServiceName + ".followers":    "/atproto/api/followers{?limit,cursor}",
 			ServiceName + ".resolveActor": "/atproto/api/resolve-actor{?target}",
@@ -258,44 +254,6 @@ func (s *Server) entityOfRequester(c echo.Context) (*store.Entity, error) {
 		return nil, c.JSON(http.StatusNotFound, map[string]string{"error": "not bridged; call setup first"})
 	}
 	return &ent, nil
-}
-
-func (s *Server) handleGetSettings(c echo.Context) error {
-	ent, err := s.entityOfRequester(c)
-	if ent == nil {
-		return err
-	}
-	return c.JSON(http.StatusOK, map[string]any{
-		"enabled":         ent.Enabled,
-		"listenTimelines": ent.ListenTimelines,
-	})
-}
-
-func (s *Server) handlePostSettings(c echo.Context) error {
-	ent, err := s.entityOfRequester(c)
-	if ent == nil {
-		return err
-	}
-	var body struct {
-		Enabled         *bool     `json:"enabled"`
-		ListenTimelines *[]string `json:"listenTimelines"`
-	}
-	if err := c.Bind(&body); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid body"})
-	}
-	updates := map[string]any{}
-	if body.Enabled != nil {
-		updates["enabled"] = *body.Enabled
-	}
-	if body.ListenTimelines != nil {
-		updates["listen_timelines"] = datatypes.NewJSONSlice(*body.ListenTimelines)
-	}
-	if len(updates) > 0 {
-		if err := s.db.Model(&store.Entity{}).Where("uid = ?", ent.Uid).Updates(updates).Error; err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "update failed"})
-		}
-	}
-	return s.handleGetSettings(c)
 }
 
 func (s *Server) handleFollowing(c echo.Context) error {

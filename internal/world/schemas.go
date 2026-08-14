@@ -23,6 +23,7 @@ const (
 	SchemaAtprotoRecord       = "https://schema.concrnt.world/atproto/record.json"
 	SchemaAtprotoFollow       = "https://schema.concrnt.world/atproto/follow.json"
 	SchemaAtprotoFollowNotify = "https://schema.concrnt.world/atproto/follow-notify.json"
+	SchemaAtprotoSettings     = "https://schema.concrnt.world/atproto/settings.json"
 )
 
 // Namespace used for keys this bridge writes into concrnt.
@@ -31,6 +32,7 @@ const (
 	InboxKeyPrefix        = InboxTimelineKey + "/"
 	FollowsKeyPrefix      = "atproto.concrnt.world/follows/"
 	FollowNotifyKeyPrefix = "atproto.concrnt.world/follow-notify/"
+	SettingsKeySuffix     = "atproto.concrnt.world/settings"
 )
 
 // Body-bearing message value shared by markdown/media/reply/reroute schemas.
@@ -76,6 +78,15 @@ type AtprotoRecord struct {
 // their own cckv space to declare a follow of a Bluesky account.
 type AtprotoFollow struct {
 	DID string `json:"did"`
+}
+
+// AtprotoSettings is the value of SchemaAtprotoSettings, committed by a user
+// into their own cckv space (SettingsKeySuffix). The record is the source of
+// truth for per-user bridge settings; absence of the record means defaults
+// (no extra listen timelines, enabled). A nil Enabled also means enabled.
+type AtprotoSettings struct {
+	ListenTimelines []string `json:"listenTimelines"`
+	Enabled         *bool    `json:"enabled,omitempty"`
 }
 
 // AtprotoFollowNotify is the value of SchemaAtprotoFollowNotify, delivered to

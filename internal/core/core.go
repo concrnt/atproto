@@ -166,6 +166,66 @@ func GetDocument[T any](ctx context.Context, s *Service, uri string) (*concrnt.D
 	return &doc, nil
 }
 
+// IsNotFound reports whether err is the upstream client's "status code 404"
+// failure for a missing resource. The client exposes no typed error for this,
+// so the message is matched here; keep every such check behind this helper.
+func IsNotFound(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "status code 404")
+}
+
+// QueryAllByPrefix pages through the server's query endpoint and returns every
+// record under prefix, restricted to schema when non-empty. The since cursor
+// is inclusive, so boundary rows repeat across pages; rows are deduplicated by
+// cckv key (last write wins). complete is false when the cursor stalls (a full
+// page sharing one createdAt) — the listing is then a usable but possibly
+// partial view, and callers must not treat missing keys as deletions.
+// Queries are anonymous: records behind a read policy are invisible here.
+func QueryAllByPrefix(ctx context.Context, s *Service, prefix string, schema string) (docs []concrnt.Document[json.RawMessage], complete bool, err error) {
+	byKey := map[string]concrnt.Document[json.RawMessage]{}
+	var since *time.Time
+	complete = true
+	for {
+		page, err := s.Client.Query(ctx, s.fqdn, client.QueryParams{
+			Prefix: prefix,
+			Schema: schema,
+			Since:  since,
+			Limit:  100,
+			Order:  "asc",
+		})
+		if err != nil {
+			return nil, false, fmt.Errorf("query %s failed: %w", prefix, err)
+		}
+		for _, sd := range page.Items {
+			if sd.CCKV == nil {
+				continue
+			}
+			var doc concrnt.Document[json.RawMessage]
+			if err := json.Unmarshal([]byte(sd.Document), &doc); err != nil {
+				slog.Debug("skipping unparsable queried document", "key", *sd.CCKV, "error", err)
+				continue
+			}
+			byKey[*sd.CCKV] = doc
+		}
+		// Items are filtered by read permission after paging, so an empty
+		// page with a cursor still means there may be more rows.
+		if page.Next == nil {
+			break
+		}
+		if since != nil && page.Next.Equal(*since) {
+			slog.Warn("query cursor stalled; listing may be incomplete", "prefix", prefix, "cursor", *since)
+			complete = false
+			break
+		}
+		next := *page.Next
+		since = &next
+	}
+	docs = make([]concrnt.Document[json.RawMessage], 0, len(byKey))
+	for _, doc := range byKey {
+		docs = append(docs, doc)
+	}
+	return docs, complete, nil
+}
+
 // Events subscribes to all concrnt core events via the shared Redis instance
 // (PSUBSCRIBE cc-event:*; channel name = prefix + resource URI, stripped before
 // emit) and emits them on the returned channel until ctx is done.

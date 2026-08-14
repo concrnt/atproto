@@ -10,19 +10,24 @@ import (
 
 // Entity is a bridged concrnt account exposed to the atproto network.
 // Uid doubles as the carstore models.Uid.
+// Per-user settings (listen timelines, enabled) live in the user's cckv
+// settings record; Enabled here is a cache of it, followed by the outbound
+// daemon, kept because pds and mgmt read it synchronously.
+// (listen_timelines was once a column here — existing DBs need a manual
+// `ALTER TABLE at_entities DROP COLUMN listen_timelines;`, AutoMigrate
+// won't drop it.)
 type Entity struct {
-	Uid             models.Uid `gorm:"column:uid;primaryKey;autoIncrement"`
-	CCID            string     `gorm:"column:ccid;uniqueIndex;not null"`
-	DID             string     `gorm:"column:did;uniqueIndex"`
-	Handle          string     `gorm:"uniqueIndex"`
-	PLCLastOpCID    string     `gorm:"column:plc_last_op_cid"`
-	HeadCID         string     `gorm:"column:head_cid"`
-	Rev             string
-	Status          string `gorm:"default:active"` // active / deactivated
-	ListenTimelines datatypes.JSONSlice[string]
-	Enabled         bool `gorm:"default:true"`
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	Uid          models.Uid `gorm:"column:uid;primaryKey;autoIncrement"`
+	CCID         string     `gorm:"column:ccid;uniqueIndex;not null"`
+	DID          string     `gorm:"column:did;uniqueIndex"`
+	Handle       string     `gorm:"uniqueIndex"`
+	PLCLastOpCID string     `gorm:"column:plc_last_op_cid"`
+	HeadCID      string     `gorm:"column:head_cid"`
+	Rev          string
+	Status       string `gorm:"default:active"` // pending / active
+	Enabled      bool   `gorm:"default:true"`
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 func (Entity) TableName() string { return "at_entities" }

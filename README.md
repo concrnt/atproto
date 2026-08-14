@@ -60,15 +60,39 @@ concrnt ユーザーが Bluesky ユーザーをフォローする操作は、ユ
 cckv 空間への follow document commit が真実です:
 
 ```
-key:    cckv://<ccid>/atproto.concrnt.world/follows/<did>
+key:    cckv://<ccid>/atproto.concrnt.world/follows/<hash(did)>
 schema: https://schema.concrnt.world/atproto/follow.json
 value:  {"did": "did:plc:..."}
 ```
 
+キー末尾は ActivityPub ブリッジの follows キーと同じ CDID ハッシュ
+(`CDID.newFromStringX(did)`)です。ブリッジはキーをパースせず value の did を
+読むため、キー形状には依存しません。
+
 ブリッジは Redis イベントでこれを検知し、ユーザーのブリッジ repo に
 `app.bsky.graph.follow` を書き込みます(相手にフォロー通知が届きます)。
-document の削除がアンフォローです。handle→DID の解決は
+document の削除がアンフォローです。加えて起動時と定期リロードで cckv 空間を
+prefix クエリして repo と突合するため、ブリッジ停止中の
+フォロー/アンフォローも復元されます(クエリは匿名アクセスなので、読み取り
+ポリシーで保護されたレコードは対象外です)。handle→DID の解決は
 `GET /atproto/api/resolve-actor?target=<handle>` を使ってください。
+
+## ユーザー設定
+
+ActivityPub ブリッジと同様、ユーザーごとの設定はユーザー自身の cckv 空間の
+settings record が真実です(クライアントが commit し、ブリッジは読むだけ):
+
+```
+key:    cckv://<ccid>/atproto.concrnt.world/settings
+schema: https://schema.concrnt.world/atproto/settings.json
+value:  {"listenTimelines": ["cckv://..."], "enabled": true}
+```
+
+- `listenTimelines`: Bluesky へ転送する投稿の転送元タイムライン。空または
+  レコード未作成ならホームタイムライン
+  (`cckv://<ccid>/concrnt.world/profiles/main/home-timeline`)のみ。
+- `enabled`: ブリッジの一時停止フラグ。省略・レコード未作成は有効扱い。
+  `at_entities.enabled` はこの値のキャッシュで、daemon が追従更新します。
 
 ## デプロイ
 
@@ -130,7 +154,6 @@ services:
 |---|---|
 | `POST /atproto/api/setup {handle}` | 登録1段階目: 持ち込みドメインで did:plc 発番、status=pending。検証手順を返す |
 | `POST /atproto/api/verify` | 登録2段階目: handle の DNS/well-known 検証成功で active 化(repo 初期化・crawl) |
-| `GET/POST /atproto/api/settings` | enabled / listenTimelines |
 | `GET /atproto/api/info` | ブリッジ情報 + 自分のエンティティ状態 |
 | `GET /atproto/api/following` | フォロー中の Bluesky アカウント一覧 |
 | `GET /atproto/api/resolve-actor?target=` | handle/DID → プロフィールプレビュー |
