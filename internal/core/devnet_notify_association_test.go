@@ -83,6 +83,40 @@ func registerThrowaway(t *testing.T, baseURL string) (string, string) {
 
 // countAssociations lists the associations on target (anonymously; the
 // target is a public post) with the given schema.
+// timelineHas reports whether the timeline's recent items include href,
+// polling briefly: the core delivers distributes through its job queue, so
+// the reference lands a moment after the commit returns.
+func timelineHas(t *testing.T, baseURL, timeline, href string) bool {
+	t.Helper()
+	q := url.Values{}
+	q.Set("uris", timeline)
+	q.Set("limit", "64")
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		resp, err := http.Get(baseURL + "/api/v2/timeline/recent?" + q.Encode())
+		if err != nil {
+			t.Fatalf("timeline query failed: %v", err)
+		}
+		var items []struct {
+			Href string `json:"href"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&items)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatalf("timeline decode failed: %v", err)
+		}
+		for _, it := range items {
+			if it.Href == href {
+				return true
+			}
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
 func countAssociations(t *testing.T, baseURL, target, schema string) int {
 	t.Helper()
 	q := url.Values{}
@@ -150,24 +184,43 @@ func TestDevnetNotifyAssociations(t *testing.T) {
 		t.Fatalf("post commit failed: %v", err)
 	}
 
+	// The user's bridge inbox, shaped as views/Bluesky.tsx creates it:
+	// allow-writers for the bridge's service account, no reader restriction.
+	inbox := toconcrnt.InboxTimeline(userCCID)
+	allowWriters := "https://policy.concrnt.world/t/allow-writers.json"
+	if _, err := core.Commit(ctx, user, concrnt.Document[map[string]any]{
+		Kind: "record", Key: inbox, Schema: "https://schema.concrnt.world/t/user.json",
+		Value: map[string]any{}, Author: userCCID, CreatedAt: time.Now().UTC(),
+		Policy: &concrnt.Policy{Entries: []concrnt.PolicyEntry{
+			{URL: &allowWriters, Params: &map[string]any{"entities": []string{ccid}}},
+		}},
+	}); err != nil {
+		t.Fatalf("inbox timeline commit failed: %v", err)
+	}
+
 	stamp := time.Now().Unix()
 	actorDID := fmt.Sprintf("did:plc:e2eactor%d", stamp)
 	override := &world.ProfileOverride{Username: "E2E Actor", Link: "https://bsky.app/profile/e2e.actor"}
 	createdAt := time.Now().UTC().Truncate(time.Second)
 
-	// 1. The body record is committed with no distributes and must stay
-	//    anonymously readable: it inherits no timeline policy.
+	// 1. The reply body is delivered to the replied-to user's inbox (AP
+	//    bridge parity: it shows up on their home timeline even when they
+	//    do not follow the author) and never to the notify timeline, so it
+	//    stays anonymously readable: the inbox carries no reader policy.
 	replyAtURI := fmt.Sprintf("at://%s/app.bsky.feed.post/reply%d", actorDID, stamp)
-	body := toconcrnt.BuildRecordDoc(ccid, actorDID, replyAtURI, "bafyfake", override, nil, createdAt)
+	body := toconcrnt.BuildRecordDoc(ccid, actorDID, replyAtURI, "bafyfake", override, []string{inbox}, createdAt)
 	if _, err := core.Commit(ctx, svc, body); err != nil {
 		t.Fatalf("body commit failed: %v", err)
 	}
 	gotBody, err := core.GetDocument[world.AtprotoRecord](ctx, svc, body.Key)
 	if err != nil {
-		t.Fatalf("undistributed body must be anonymously readable: %v", err)
+		t.Fatalf("inbox-distributed body must be anonymously readable: %v", err)
 	}
 	if gotBody.Value.AtURI != replyAtURI {
 		t.Errorf("resolved wrong body: %+v", gotBody)
+	}
+	if !timelineHas(t, baseURL, inbox, body.Key) {
+		t.Errorf("reply body %s not found in the replied-to user's inbox %s", body.Key, inbox)
 	}
 
 	// Control: the same record distributed into the notify timeline inherits

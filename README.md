@@ -212,7 +212,7 @@ volume で同じディレクトリに重ねる想定です(concrnt 本体・Acti
 | `GET /atproto/api/info` | ブリッジ情報 + 自分のエンティティ状態 |
 | `GET /atproto/api/following` | フォロー中の Bluesky アカウント一覧 |
 | `GET /atproto/api/resolve-actor?target=` | handle/DID → プロフィールプレビュー |
-| `GET /atproto/api/resolve?uri=` | at-uri → appview の post view(atproto/record.json 表示用) |
+| `GET /atproto/api/resolve?uri=` | at-uri → appview の post view(atproto/record.json 表示用)。ブリッジが輸出した投稿なら `concrntURI`(元の cckv URI)を付加 |
 
 ## 開発
 

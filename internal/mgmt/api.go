@@ -469,6 +469,10 @@ func (s *Server) handleResolveActor(c echo.Context) error {
 
 // handleResolveRecord proxies an at-uri to the appview so clients can render
 // atproto/record.json references.
+// handleResolveRecord returns the appview post view for an at-uri. When the
+// post is one this bridge exported from concrnt, the view is annotated with
+// `concrntURI` (the original cckv post) so clients can render it natively,
+// the way the AP bridge's note URLs embed the concrnt URI.
 func (s *Server) handleResolveRecord(c echo.Context) error {
 	uri := c.QueryParam("uri")
 	if !strings.HasPrefix(uri, "at://") {
@@ -478,5 +482,27 @@ func (s *Server) handleResolveRecord(c echo.Context) error {
 	if err != nil || len(posts) == 0 {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "post not found"})
 	}
-	return c.JSON(http.StatusOK, posts[0])
+	view := posts[0]
+	if ccURI := s.exportedPostCcURI(uri); ccURI != "" {
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(view, &m); err == nil {
+			if enc, err := json.Marshal(ccURI); err == nil {
+				m["concrntURI"] = enc
+				if annotated, err := json.Marshal(m); err == nil {
+					view = annotated
+				}
+			}
+		}
+	}
+	return c.JSONBlob(http.StatusOK, view)
+}
+
+// exportedPostCcURI resolves the at-uri of a post this bridge exported to
+// its concrnt post URI, "" when the post was not exported by the bridge.
+func (s *Server) exportedPostCcURI(atURI string) string {
+	var m store.URIMap
+	if err := s.db.Where("at_uri = ? AND ref_type = ?", atURI, "outbound-post").First(&m).Error; err != nil {
+		return ""
+	}
+	return m.CcURI
 }

@@ -127,6 +127,24 @@ func (g *Ingester) followerInboxes(ctx context.Context, did string) []string {
 	return inboxes
 }
 
+// inboxOfDID resolves a bridged DID to its owner's inbox timeline, "" when
+// the DID is not bridged or the inbox timeline does not exist yet (delivery
+// to a missing inbox is refused by policy, see followerInboxes).
+func (g *Ingester) inboxOfDID(ctx context.Context, did string) string {
+	ccid := g.ccidOfDID(did)
+	if ccid == "" {
+		return ""
+	}
+	if err := g.inboxes.EnsureLoaded(ctx, ccid); err != nil {
+		slog.Error("failed to load inbox state", "ccid", ccid, "error", err)
+	}
+	if !g.inboxes.Has(ccid) {
+		slog.Debug("skipping reply delivery: no inbox timeline", "ccid", ccid)
+		return ""
+	}
+	return toconcrnt.InboxTimeline(ccid)
+}
+
 // ccidOfDID resolves a bridged DID to its owner's CCID ("" when not bridged).
 func (g *Ingester) ccidOfDID(did string) string {
 	var ent store.Entity
@@ -209,8 +227,10 @@ func (g *Ingester) notifyInteraction(ctx context.Context, ev *Event, refType, sc
 
 // IngestPost mirrors a post from a followed actor and/or a reply/quote
 // aimed at bridged accounts. The body record goes to followers' inboxes
-// only; replies and quotes of bridged users' exported posts are notified
-// with reply/reroute associations on those posts.
+// and, like the AP bridge, to the inbox of the user whose exported post is
+// replied to (so the reply shows up on their home timeline even when they
+// do not follow the author); replies and quotes of bridged users' exported
+// posts are notified with reply/reroute associations on those posts.
 func (g *Ingester) IngestPost(ctx context.Context, ev *Event, isFollowed bool, targets toconcrnt.PostRefSet) {
 	uri := atURI(ev)
 
@@ -220,6 +240,11 @@ func (g *Ingester) IngestPost(ctx context.Context, ev *Event, isFollowed bool, t
 	}
 	replyTarget := g.exportedPostCcURI(targets.Parent)
 	quoteTarget := g.exportedPostCcURI(targets.Quote)
+	if replyTarget != "" {
+		if inbox := g.inboxOfDID(ctx, didOfATURI(targets.Parent)); inbox != "" {
+			distributes = append(distributes, inbox)
+		}
+	}
 	if len(distributes) == 0 && replyTarget == "" && quoteTarget == "" {
 		return
 	}
