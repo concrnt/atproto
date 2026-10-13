@@ -3,6 +3,9 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
 
 	"gopkg.in/yaml.v3"
 )
@@ -59,6 +62,12 @@ type Config struct {
 	Atproto  Atproto  `yaml:"atproto"`
 }
 
+// Load reads the config from path. path may be a single YAML file, or a
+// directory: every regular file in it is parsed in name order and deep-merged
+// (later files override earlier ones, field by field, so a secret.yaml
+// holding only `concrnt.privateKey` layers over a config.yaml). This is the
+// layout a Kubernetes projected volume (ConfigMap + Secret) produces, and
+// mirrors the concrnt core / ActivityPub bridge loaders.
 func Load(path string) (*Config, error) {
 	if path == "" {
 		path = os.Getenv("CONFIG_PATH")
@@ -67,14 +76,20 @@ func Load(path string) (*Config, error) {
 		path = "/app/config.yaml"
 	}
 
-	b, err := os.ReadFile(path)
+	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config %s: %w", path, err)
 	}
 
 	var c Config
-	if err := yaml.Unmarshal(b, &c); err != nil {
-		return nil, fmt.Errorf("failed to parse config %s: %w", path, err)
+	if info.IsDir() {
+		if err := loadDir(path, &c); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := loadFile(path, &c); err != nil {
+			return nil, err
+		}
 	}
 
 	if c.Server.Port == 0 {
@@ -110,4 +125,69 @@ func Load(path string) (*Config, error) {
 	}
 
 	return &c, nil
+}
+
+func loadFile(path string, c *Config) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("failed to read config %s: %w", path, err)
+	}
+	if err := yaml.Unmarshal(b, c); err != nil {
+		return fmt.Errorf("failed to parse config %s: %w", path, err)
+	}
+	return nil
+}
+
+func loadDir(dir string, c *Config) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("failed to read config directory %s: %w", dir, err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+
+	loaded := 0
+	for _, name := range names {
+		entryPath := filepath.Join(dir, name)
+		// os.Stat follows symlinks: a projected volume exposes its files as
+		// symlinks into a `..data` directory, which must be skipped as a
+		// directory, while the file symlinks themselves must be read.
+		info, err := os.Stat(entryPath)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		var layer Config
+		if err := loadFile(entryPath, &layer); err != nil {
+			return err
+		}
+		merge(reflect.ValueOf(c).Elem(), reflect.ValueOf(&layer).Elem())
+		loaded++
+	}
+	if loaded == 0 {
+		return fmt.Errorf("no config files found in %s", dir)
+	}
+	return nil
+}
+
+// merge copies every non-zero field of src into dst, descending into nested
+// structs so that a partial overlay only replaces the keys it names.
+func merge(dst, src reflect.Value) {
+	for i := range dst.NumField() {
+		d := dst.Field(i)
+		s := src.Field(i)
+		if !d.CanSet() {
+			continue
+		}
+		if d.Kind() == reflect.Struct {
+			merge(d, s)
+			continue
+		}
+		if s.IsZero() {
+			continue
+		}
+		d.Set(s)
+	}
 }

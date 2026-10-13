@@ -152,6 +152,14 @@ services:
 `config.example.yaml` をコピーして編集し、`CONFIG_PATH` で指定します
 (既定 `/app/config.yaml`)。マイグレーションは起動時に自動実行されます。
 
+`CONFIG_PATH` にディレクトリを指定すると、その中のファイルを名前順に読んで
+深いマージします(後のファイルが同名キーだけを上書き)。Kubernetes で
+ConfigMap(`config.yaml`)と Secret(`secret.yaml`: `concrnt.privateKey`・
+`atproto.masterRotationKey`・`atproto.keyEncryptionKey` だけ)を projected
+volume で同じディレクトリに重ねる想定です(concrnt 本体・ActivityPub ブリッジと
+同じ方式)。Helm チャートは [concrnt/helmcharts](https://github.com/concrnt/helmcharts)
+の `concrnt2` チャートの `atproto:` ブロックで有効化します。
+
 ### 運用エンドポイント(ゲートウェイ非経由)
 
 同じポートで `GET /health`(liveness、`{"status":"ok"}`)と `GET /metrics`
