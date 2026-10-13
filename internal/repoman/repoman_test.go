@@ -57,10 +57,23 @@ func fakePLC(t *testing.T) *httptest.Server {
 
 func newTestManager(t *testing.T) (*Manager, *gorm.DB) {
 	t.Helper()
+	return newTestManagerWithDB(t, t.TempDir())
+}
+
+// newTestManagerAt opens a Manager on dir (db + carstore + event store), so a
+// test can close it and reopen the same state like a process restart.
+func newTestManagerAt(t *testing.T, dir string) *Manager {
+	t.Helper()
+	m, _ := newTestManagerWithDB(t, dir)
+	return m
+}
+
+func newTestManagerWithDB(t *testing.T, dir string) (*Manager, *gorm.DB) {
+	t.Helper()
 
 	// A file-backed database: sqlite ":memory:" gives every pooled
 	// connection its own empty database, which breaks under concurrency.
-	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "test.db")), &gorm.Config{
+	db, err := gorm.Open(sqlite.Open(filepath.Join(dir, "test.db")), &gorm.Config{
 		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
 	})
 	if err != nil {
@@ -87,7 +100,7 @@ func newTestManager(t *testing.T) (*Manager, *gorm.DB) {
 	}
 	plcSvc := plcm.NewService(plcSrv.URL, rotation, "test.example")
 
-	m, err := New(db, t.TempDir(), ks, plcSvc, time.Hour)
+	m, err := New(db, dir, ks, plcSvc, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -10,7 +10,10 @@ import (
 	"testing"
 	"time"
 
+	comatproto "github.com/bluesky-social/indigo/api/atproto"
 	"github.com/bluesky-social/indigo/atproto/atcrypto"
+	"github.com/bluesky-social/indigo/events"
+	"github.com/bluesky-social/indigo/events/schedulers/sequential"
 	"github.com/glebarez/sqlite"
 	"github.com/gorilla/websocket"
 	"github.com/labstack/echo/v4"
@@ -101,4 +104,47 @@ func TestFreshConsumerTriggersAnnouncement(t *testing.T) {
 		t.Fatalf("malformed cursor status %d", resp.StatusCode)
 	}
 	waitCalls(1)
+}
+
+// A consumer resuming with ?cursor=N must receive only events after N.
+func TestCursorResumesStrictlyAfter(t *testing.T) {
+	ctx := context.Background()
+	s := newTestServer(t)
+	e := echo.New()
+	s.Register(e)
+	srv := httptest.NewServer(e)
+	defer srv.Close()
+
+	did := "did:plc:cursortest"
+	for i := 0; i < 3; i++ {
+		if err := s.repos.EmitAccount(ctx, did, true, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	conn := dialFirehose(t, srv, "?cursor=1")
+	defer conn.Close()
+	got := make(chan int64, 4)
+	cb := &events.RepoStreamCallbacks{
+		RepoAccount: func(evt *comatproto.SyncSubscribeRepos_Account) error {
+			got <- evt.Seq
+			return nil
+		},
+	}
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go events.HandleRepoStream(streamCtx, conn, sequential.NewScheduler("test", cb.EventHandler), nil)
+
+	var seqs []int64
+	for len(seqs) < 2 {
+		select {
+		case seq := <-got:
+			seqs = append(seqs, seq)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out, got %v", seqs)
+		}
+	}
+	if seqs[0] != 2 || seqs[1] != 3 {
+		t.Fatalf("resume from cursor 1 returned %v, want [2 3]", seqs)
+	}
 }

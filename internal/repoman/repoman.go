@@ -44,6 +44,11 @@ type Manager struct {
 
 	announceMu   sync.Mutex
 	lastAnnounce time.Time
+
+	// seqMu serializes sequence assignment with persistence so the persisted
+	// stream is strictly increasing; seq is the last number handed out.
+	seqMu sync.Mutex
+	seq   int64
 }
 
 // announceInterval throttles AnnounceActiveAccounts: a relay connects without
@@ -76,8 +81,52 @@ func New(db *gorm.DB, dataDir string, ks *keys.Service, plc *plcm.Service, reten
 		plc:      plc,
 		didByUid: map[models.Uid]string{},
 	}
+	// Sequence numbers are the bridge's job: pebblepersist stores whatever
+	// Sequence() returns and never assigns one. Continue from the last
+	// persisted event so cursors survive restarts. (Walks the retained
+	// window with Playback rather than GetLast, which leaks its iterator
+	// and then makes Shutdown fail.)
+	if err := pp.Playback(context.Background(), 0, func(evt *events.XRPCStreamEvent) error {
+		if seq := evt.Sequence(); seq > m.seq {
+			m.seq = seq
+		}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("failed to read persisted firehose events: %w", err)
+	}
 	m.mgr.SetEventHandler(m.handleRepoEvent, false)
 	return m, nil
+}
+
+// Close releases the firehose event store so the data dir can be reopened
+// (tests simulating a restart). Every write is already synced, so the
+// process does not need this at shutdown; closing under a live cursor
+// playback would panic.
+func (m *Manager) Close(ctx context.Context) error {
+	return m.pp.Shutdown(ctx)
+}
+
+// addEvent stamps the next sequence number on evt and persists/broadcasts
+// it. Relay consumers drop any event whose seq is not greater than the last
+// one they saw on the connection (indigo relay: "got events out of order
+// from stream"), so unsequenced events (all seq 0) let exactly one event
+// through per connection and silently lose everything after it; they also
+// never advance the relay's cursor, so every reconnect starts cursor-less.
+func (m *Manager) addEvent(ctx context.Context, evt *events.XRPCStreamEvent) error {
+	m.seqMu.Lock()
+	defer m.seqMu.Unlock()
+	m.seq++
+	switch {
+	case evt.RepoCommit != nil:
+		evt.RepoCommit.Seq = m.seq
+	case evt.RepoIdentity != nil:
+		evt.RepoIdentity.Seq = m.seq
+	case evt.RepoAccount != nil:
+		evt.RepoAccount.Seq = m.seq
+	case evt.RepoSync != nil:
+		evt.RepoSync.Seq = m.seq
+	}
+	return m.em.AddEvent(ctx, evt)
 }
 
 // Events exposes the event manager for the firehose WebSocket handler.
@@ -142,7 +191,7 @@ func (m *Manager) handleRepoEvent(ctx context.Context, evt *repomgr.RepoEvent) {
 		}
 	}
 
-	if err := m.em.AddEvent(ctx, &events.XRPCStreamEvent{
+	if err := m.addEvent(ctx, &events.XRPCStreamEvent{
 		RepoCommit: commit,
 		PrivUid:    evt.User,
 	}); err != nil {
@@ -171,7 +220,7 @@ func (m *Manager) commitDataCID(ctx context.Context, uid models.Uid, root cid.Ci
 
 // EmitIdentity broadcasts an #identity event for did.
 func (m *Manager) EmitIdentity(ctx context.Context, did, handle string) error {
-	return m.em.AddEvent(ctx, &events.XRPCStreamEvent{
+	return m.addEvent(ctx, &events.XRPCStreamEvent{
 		RepoIdentity: &comatproto.SyncSubscribeRepos_Identity{
 			Did:    did,
 			Handle: &handle,
@@ -182,7 +231,7 @@ func (m *Manager) EmitIdentity(ctx context.Context, did, handle string) error {
 
 // EmitAccount broadcasts an #account event for did.
 func (m *Manager) EmitAccount(ctx context.Context, did string, active bool, status *string) error {
-	return m.em.AddEvent(ctx, &events.XRPCStreamEvent{
+	return m.addEvent(ctx, &events.XRPCStreamEvent{
 		RepoAccount: &comatproto.SyncSubscribeRepos_Account{
 			Did:    did,
 			Active: active,

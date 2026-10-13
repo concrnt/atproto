@@ -195,3 +195,77 @@ func TestCommitEventsCarryPrevData(t *testing.T) {
 		}
 	}
 }
+
+// Firehose events must carry strictly increasing sequence numbers, and the
+// numbering must continue across a restart (relays resume by cursor).
+func TestFirehoseSequenceNumbersIncreaseAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	m := newTestManagerAt(t, dir)
+
+	evts, cancel, err := m.Events().Subscribe(ctx, "test", func(*events.XRPCStreamEvent) bool { return true }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	did := activate(t, m, "con1seq", "seq.test.example")
+	post := &appbsky.FeedPost{LexiconTypeID: "app.bsky.feed.post", Text: "p", CreatedAt: "2026-07-20T00:00:00.000Z"}
+	if _, _, err := m.CreateRecord(ctx, did, "app.bsky.feed.post", post); err != nil {
+		t.Fatal(err)
+	}
+
+	// identity, account, init commit, post commit
+	var last int64
+	for i := 0; i < 4; i++ {
+		select {
+		case evt := <-evts:
+			seq := evt.Sequence()
+			if seq <= last {
+				t.Fatalf("event %d seq %d not greater than previous %d", i, seq, last)
+			}
+			last = seq
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out at event %d", i)
+		}
+	}
+	cancel()
+	if err := m.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen on the same data dir: numbering continues after the last one.
+	// (Not closed again: a cursor playback goroutine below may still be
+	// draining when the test ends, and closing pebble under it panics.)
+	m2 := newTestManagerAt(t, dir)
+	evts2, cancel2, err := m2.Events().Subscribe(ctx, "test2", func(*events.XRPCStreamEvent) bool { return true }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel2()
+	if err := m2.EmitAccount(ctx, did, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case evt := <-evts2:
+		if evt.Sequence() != last+1 {
+			t.Fatalf("after restart seq %d, want %d", evt.Sequence(), last+1)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out after restart")
+	}
+
+	// Playback is inclusive of its bound (the pds handler adds 1 to the
+	// consumer's cursor); the persisted stream survives the restart.
+	replay, cancel3, err := m2.Events().Subscribe(ctx, "test3", func(*events.XRPCStreamEvent) bool { return true }, &last)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel3()
+	select {
+	case evt := <-replay:
+		if evt.Sequence() != last {
+			t.Fatalf("playback from %d returned seq %d", last, evt.Sequence())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out on playback")
+	}
+}

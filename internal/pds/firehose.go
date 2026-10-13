@@ -90,7 +90,14 @@ func (s *Server) handleSubscribeRepos(c echo.Context) error {
 	}()
 
 	ident := c.RealIP() + "-" + c.Request().UserAgent()
-	evts, cleanup, err := s.repos.Events().Subscribe(ctx, ident, func(evt *events.XRPCStreamEvent) bool { return true }, since)
+	// cursor is the last seq the consumer already has; playback must resume
+	// strictly after it (pebblepersist's Playback is inclusive of its bound).
+	var resumeFrom *int64
+	if since != nil {
+		next := *since + 1
+		resumeFrom = &next
+	}
+	evts, cleanup, err := s.repos.Events().Subscribe(ctx, ident, func(evt *events.XRPCStreamEvent) bool { return true }, resumeFrom)
 	if err != nil {
 		return err
 	}

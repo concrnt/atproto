@@ -206,6 +206,10 @@ goat firehose --host ws://localhost:8011
 
 - Jetstream 経由の受信は署名検証なし・リプレイ窓限定です(長時間停止時の
   取りこぼしは許容)。将来 relay firehose 直結に差し替え可能な構造です。
+- firehose のイベントには単調増加の `seq` を付けています(pebblepersist は seq を採番せず
+  渡された値を保存するだけ)。relay は接続中に `seq` が前回以下のイベントを "got events out
+  of order" として捨てるため、全部 `seq: 0` だと接続ごとに最初の 1 件しか届かず、cursor も
+  進まない(毎回 cursor 無し接続になる)。
 - `getRecord` の MST proof と `#sync` イベントは未実装です。`#commit` の `prevData`
   (sync v1.1)は付けています: bsky.network は strict 検証で、既知の repo に対する
   `prevData` 無しの commit を "missing prevData field" で捨てる(最初の 1 件だけ通る)ため、
