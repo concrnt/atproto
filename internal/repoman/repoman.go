@@ -18,6 +18,7 @@ import (
 	"github.com/bluesky-social/indigo/events/pebblepersist"
 	lexutil "github.com/bluesky-social/indigo/lex/util"
 	"github.com/bluesky-social/indigo/models"
+	"github.com/bluesky-social/indigo/repo"
 	"github.com/bluesky-social/indigo/repomgr"
 	"github.com/bluesky-social/indigo/util"
 	"github.com/ipfs/go-cid"
@@ -127,8 +128,18 @@ func (m *Manager) handleRepoEvent(ctx context.Context, evt *repomgr.RepoEvent) {
 		Ops:    ops,
 		Blobs:  []lexutil.LexLink{},
 		Time:   time.Now().UTC().Format(util.ISO8601),
-		// TODO(sync-v1.1): set PrevData (the previous commit's MST root) once
-		// we track it; relays currently accept commits without it.
+	}
+	// Sync v1.1: prevData is the previous commit's MST root. Strict relays
+	// (bsky.network) accept a commit without it only when they have no prior
+	// state for the account, and drop every later one ("missing prevData
+	// field"), so only the first commit a relay sees would ever land.
+	if evt.OldRoot != nil {
+		prevData, err := m.commitDataCID(ctx, evt.User, *evt.OldRoot)
+		if err != nil {
+			slog.Error("failed to read previous commit for prevData", "did", did, "error", err)
+		} else {
+			commit.PrevData = (*lexutil.LexLink)(&prevData)
+		}
 	}
 
 	if err := m.em.AddEvent(ctx, &events.XRPCStreamEvent{
@@ -142,6 +153,20 @@ func (m *Manager) handleRepoEvent(ctx context.Context, evt *repomgr.RepoEvent) {
 		Updates(map[string]any{"head_cid": evt.NewRoot.String(), "rev": evt.Rev}).Error; err != nil {
 		slog.Error("failed to update entity head", "did", did, "error", err)
 	}
+}
+
+// commitDataCID reads the MST root (`data`) of the commit at root out of the
+// user's carstore.
+func (m *Manager) commitDataCID(ctx context.Context, uid models.Uid, root cid.Cid) (cid.Cid, error) {
+	ds, err := m.cs.ReadOnlySession(uid)
+	if err != nil {
+		return cid.Undef, err
+	}
+	r, err := repo.OpenRepo(ctx, ds, root)
+	if err != nil {
+		return cid.Undef, err
+	}
+	return r.DataCid(), nil
 }
 
 // EmitIdentity broadcasts an #identity event for did.

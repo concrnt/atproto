@@ -206,8 +206,10 @@ goat firehose --host ws://localhost:8011
 
 - Jetstream 経由の受信は署名検証なし・リプレイ窓限定です(長時間停止時の
   取りこぼしは許容)。将来 relay firehose 直結に差し替え可能な構造です。
-- `getRecord` の MST proof、`#sync` イベント、`prevData`(sync v1.1)は未実装
-  です。relay の lenient モードを前提としています。
+- `getRecord` の MST proof と `#sync` イベントは未実装です。`#commit` の `prevData`
+  (sync v1.1)は付けています: bsky.network は strict 検証で、既知の repo に対する
+  `prevData` 無しの commit を "missing prevData field" で捨てる(最初の 1 件だけ通る)ため、
+  これが無いと 2 投稿目以降が Bluesky に届きません。
 - relay にはホスト毎アカウント上限があります。アカウント数が増えたら
   Bluesky 運営に trusted domain 枠を相談してください。
 - `masterRotationKey` は全ブリッジ DID の PLC rotation key です。漏洩すると
