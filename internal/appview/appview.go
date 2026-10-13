@@ -62,6 +62,23 @@ func (c *Client) GetProfile(ctx context.Context, actor string) (*Profile, error)
 	return &p, nil
 }
 
+// GetProfiles hydrates up to 25 actors (DIDs or handles) in one call.
+// Actors the appview cannot resolve (deleted, suspended) are simply absent
+// from the result rather than failing the whole batch.
+func (c *Client) GetProfiles(ctx context.Context, actors []string) ([]Profile, error) {
+	params := url.Values{}
+	for _, a := range actors {
+		params.Add("actors", a)
+	}
+	var resp struct {
+		Profiles []Profile `json:"profiles"`
+	}
+	if err := c.get(ctx, "app.bsky.actor.getProfiles", params, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Profiles, nil
+}
+
 // GraphPage is one page of an app.bsky.graph.* actor list.
 type GraphPage struct {
 	Profiles []Profile

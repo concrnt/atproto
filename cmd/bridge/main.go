@@ -164,6 +164,7 @@ func run() error {
 	pdsSrv.Register(e)
 
 	mgmtSrv := mgmt.NewServer(db, repos, av, pdsHost, cfg.Atproto.Relays, version, cfg.Concrnt.CCID)
+	mgmtSrv.ActorTTL = time.Duration(cfg.Atproto.ActorCacheTTLMinutes) * time.Minute
 	mgmtSrv.OnProfileInit = func(ctx context.Context, ent *store.Entity) {
 		if err := daemon.SyncProfile(ctx, ent); err != nil {
 			slog.Error("initial profile sync failed", "ccid", ent.CCID, "error", err)

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/concrnt/atproto/internal/appview"
 	"github.com/concrnt/atproto/internal/relay"
@@ -62,6 +64,11 @@ type Server struct {
 	serviceCcid string
 	graph       graphCache
 
+	// ActorTTL bounds how old an at_actors row may be before the following
+	// list refreshes it from the appview. Shared meaning with the ingester's
+	// actor cache TTL.
+	ActorTTL time.Duration
+
 	// OnProfileInit is called after an account goes active so the outbound
 	// layer can push the user's concrnt profile into their new bsky repo.
 	OnProfileInit func(ctx context.Context, ent *store.Entity)
@@ -78,6 +85,7 @@ func NewServer(db *gorm.DB, repos *repoman.Manager, av *appview.Client, pdsHost 
 		relays:      relays,
 		version:     version,
 		serviceCcid: serviceCcid,
+		ActorTTL:    time.Hour,
 	}
 }
 
@@ -313,11 +321,11 @@ func (s *Server) handleFollowing(c echo.Context) error {
 	if err := s.db.Where("ccid = ?", ent.CCID).Order("created_at desc").Find(&follows).Error; err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "query failed"})
 	}
+	actors := s.followingActors(c.Request().Context(), follows)
 	out := make([]map[string]any, 0, len(follows))
 	for _, f := range follows {
 		entry := map[string]any{"did": f.SubjectDID}
-		var actor store.Actor
-		if err := s.db.Where("did = ?", f.SubjectDID).First(&actor).Error; err == nil {
+		if actor, ok := actors[f.SubjectDID]; ok {
 			entry["handle"] = actor.Handle
 			entry["displayName"] = actor.DisplayName
 			entry["avatar"] = actor.AvatarURL
@@ -325,6 +333,66 @@ func (s *Server) handleFollowing(c echo.Context) error {
 		out = append(out, entry)
 	}
 	return c.JSON(http.StatusOK, map[string]any{"following": out})
+}
+
+// followingActors returns the cached display info for every followed DID.
+// at_actors is otherwise only filled when a followee's post is ingested, so
+// a followee who has not posted since the follow would render as a bare DID;
+// missing or stale rows are hydrated from the appview in batches and written
+// back so later requests are served from the cache. Appview failures keep
+// whatever is cached (possibly stale) rather than failing the listing.
+func (s *Server) followingActors(ctx context.Context, follows []store.Follow) map[string]store.Actor {
+	actors := map[string]store.Actor{}
+	if len(follows) == 0 {
+		return actors
+	}
+	dids := make([]string, 0, len(follows))
+	for _, f := range follows {
+		dids = append(dids, f.SubjectDID)
+	}
+	var cached []store.Actor
+	s.db.Where("did IN ?", dids).Find(&cached)
+	for _, a := range cached {
+		actors[a.DID] = a
+	}
+
+	var refresh []string
+	for _, did := range dids {
+		if a, ok := actors[did]; !ok || time.Since(a.FetchedAt) > s.ActorTTL {
+			refresh = append(refresh, did)
+		}
+	}
+	if len(refresh) == 0 || s.appview == nil {
+		return actors
+	}
+
+	const batch = 25
+	for start := 0; start < len(refresh); start += batch {
+		end := start + batch
+		if end > len(refresh) {
+			end = len(refresh)
+		}
+		profiles, err := s.appview.GetProfiles(ctx, refresh[start:end])
+		if err != nil {
+			slog.Warn("failed to hydrate followed actors", "count", end-start, "error", err)
+			continue
+		}
+		for _, p := range profiles {
+			actor := store.Actor{
+				DID:         p.DID,
+				Handle:      p.Handle,
+				DisplayName: p.DisplayName,
+				AvatarURL:   p.Avatar,
+				FetchedAt:   time.Now(),
+			}
+			s.db.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "did"}},
+				UpdateAll: true,
+			}).Create(&actor)
+			actors[actor.DID] = actor
+		}
+	}
+	return actors
 }
 
 // handleFollowers proxies app.bsky.graph.getFollowers for the requester's own
