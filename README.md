@@ -180,7 +180,7 @@ volume で同じディレクトリに重ねる想定です(concrnt 本体・Acti
 |---|---|
 | `POST /atproto/api/setup {handle}` | 登録1段階目: 持ち込みドメインで did:plc 発番、status=pending。検証手順を返す |
 | `POST /atproto/api/verify` | 登録2段階目: handle の DNS/well-known 検証成功で active 化(relay へ requestCrawl → repo 初期化) |
-| `POST /atproto/api/announce` | 自分の `#identity`/`#account` を firehose に再送し requestCrawl もやり直す。appview が `handle.invalid` を表示している(DNS 反映前に検証された)時や relay が activation を取りこぼした時に使う |
+| `POST /atproto/api/announce` | 自分の `#identity`/`#account` を firehose に再送し、requestCrawl と concrnt プロフィールの repo への同期(新しい #commit)もやり直す。appview が `handle.invalid` を表示している(DNS 反映前に検証された)時、relay が activation を取りこぼした時、プロフィールが Bluesky 側に反映されない時に使う |
 | `GET /atproto/api/info` | ブリッジ情報 + 自分のエンティティ状態 |
 | `GET /atproto/api/following` | フォロー中の Bluesky アカウント一覧 |
 | `GET /atproto/api/resolve-actor?target=` | handle/DID → プロフィールプレビュー |

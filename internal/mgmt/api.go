@@ -267,10 +267,12 @@ func (s *Server) handleVerify(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]any{"did": ent.DID, "handle": ent.Handle, "status": "active"})
 }
 
-// handleAnnounce re-broadcasts the caller's #identity/#account on the
-// firehose and re-requests a relay crawl. For when the appview shows
-// handle.invalid (its handle check failed or ran before DNS propagated) or a
-// relay missed the activation: the appview re-verifies on #identity.
+// handleAnnounce re-pushes everything the network should know about the
+// caller: #identity/#account on the firehose, a relay crawl request, and the
+// concrnt profile into the bsky repo (a new #commit). For when the appview
+// shows handle.invalid (its handle check failed or ran before DNS
+// propagated), a relay missed the activation, or the profile never made it
+// across: the appview re-verifies on #identity and re-indexes on #commit.
 func (s *Server) handleAnnounce(c echo.Context) error {
 	ent, err := s.entityOfRequester(c)
 	if ent == nil {
@@ -284,6 +286,9 @@ func (s *Server) handleAnnounce(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 	go relay.RequestCrawl(context.Background(), s.relays, s.pdsHost)
+	if s.OnProfileInit != nil {
+		go s.OnProfileInit(context.Background(), ent)
+	}
 	return c.JSON(http.StatusOK, map[string]any{"did": ent.DID, "handle": ent.Handle, "status": ent.Status})
 }
 

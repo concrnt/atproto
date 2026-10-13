@@ -223,10 +223,21 @@ func TestAnnounceRequiresActiveAccount(t *testing.T) {
 	}
 	defer cancel()
 
+	profileSynced := make(chan string, 1)
+	srv.OnProfileInit = func(_ context.Context, ent *store.Entity) { profileSynced <- ent.CCID }
+
 	rec = httptest.NewRecorder()
 	e.ServeHTTP(rec, authedReq(http.MethodPost, "/atproto/api/announce", ``, "con1carol"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("announce status %d: %s", rec.Code, rec.Body)
+	}
+	select {
+	case ccid := <-profileSynced:
+		if ccid != "con1carol" {
+			t.Fatalf("profile re-sync for wrong account %s", ccid)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("announce did not trigger a profile re-sync")
 	}
 	var kinds []string
 	deadline := time.After(5 * time.Second)
