@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -53,6 +54,23 @@ func parseRotationKey(s string) (atcrypto.PrivateKey, error) {
 		return nil, fmt.Errorf("masterRotationKey is neither multibase nor hex")
 	}
 	return atcrypto.ParsePrivateBytesK256(raw)
+}
+
+// newEcho builds the HTTP router with the app-wide middleware. CORS is set
+// here rather than by the gateway's injectCors so that both faces behave the
+// same as the ActivityPub bridge: the management API is called cross-origin
+// by web clients (world.concrnt.net), and the public PDS face (/xrpc) by
+// atproto web apps.
+func newEcho() *echo.Echo {
+	e := echo.New()
+	e.HideBanner = true
+	e.Use(echomiddleware.Recover())
+	e.Use(echomiddleware.CORSWithConfig(echomiddleware.CORSConfig{
+		AllowOrigins: []string{"*"},
+		AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
+		AllowHeaders: []string{echo.HeaderContentType, echo.HeaderAuthorization},
+	}))
+	return e
 }
 
 func run() error {
@@ -130,9 +148,7 @@ func run() error {
 	// A single listener carries everything; the concrnt gateway proxies both
 	// the public PDS routes (/xrpc) and the management API
 	// (/cc-info, /atproto/api). The bridge must not be exposed directly.
-	e := echo.New()
-	e.HideBanner = true
-	e.Use(echomiddleware.Recover())
+	e := newEcho()
 
 	pds.NewServer(db, repos, blobSvc, pdsHost, version).Register(e)
 
