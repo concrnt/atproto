@@ -56,6 +56,11 @@ type Follow struct {
 func (Follow) TableName() string { return "at_follows" }
 
 // URIMap relates atproto records with concrnt resources, in both directions.
+// The key is (at_uri, ref_type): one inbound post can carry both a reply
+// notification and a quote notification (inbound-reply + inbound-reroute).
+// (at_uri alone was once the primary key — existing DBs need a manual
+// `ALTER TABLE at_uri_map DROP CONSTRAINT at_uri_map_pkey, ADD PRIMARY KEY (at_uri, ref_type);`,
+// AutoMigrate won't change a primary key.)
 type URIMap struct {
 	AtURI      string `gorm:"column:at_uri;primaryKey"`
 	CcURI      string `gorm:"column:cc_uri;index"`
@@ -64,8 +69,8 @@ type URIMap struct {
 	Rkey       string
 	CID        string `gorm:"column:cid"`
 	// outbound-post / outbound-repost / outbound-like / outbound-follow /
-	// inbound-like / inbound-post ...
-	RefType   string         `gorm:"index"`
+	// inbound-like / inbound-reply / inbound-reroute / inbound-follow
+	RefType   string         `gorm:"primaryKey;index"`
 	Meta      datatypes.JSON `gorm:"type:jsonb"`
 	CreatedAt time.Time
 }

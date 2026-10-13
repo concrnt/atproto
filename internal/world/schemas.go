@@ -16,8 +16,12 @@ const (
 	SchemaAPNote    = "https://schema.concrnt.world/ap/note.json"
 	SchemaLike      = "https://schema.concrnt.world/a/like.json"
 	SchemaReaction  = "https://schema.concrnt.world/a/reaction.json"
-	SchemaReference = "https://schema.concrnt.net/reference.json"
-	SchemaDelete    = "https://schema.concrnt.net/delete.json"
+	// Notification associations (same ones the ActivityPub bridge delivers
+	// to a user's notify timeline for inbound replies / boosts).
+	SchemaReplyAssociation   = "https://schema.concrnt.world/a/reply.json"
+	SchemaRerouteAssociation = "https://schema.concrnt.world/a/reroute.json"
+	SchemaReference          = "https://schema.concrnt.net/reference.json"
+	SchemaDelete             = "https://schema.concrnt.net/delete.json"
 
 	// Schemas introduced by this bridge.
 	SchemaAtprotoRecord       = "https://schema.concrnt.world/atproto/record.json"
@@ -28,11 +32,10 @@ const (
 
 // Namespace used for keys this bridge writes into concrnt.
 const (
-	InboxTimelineKey      = "atproto.concrnt.world/inbox"
-	InboxKeyPrefix        = InboxTimelineKey + "/"
-	FollowsKeyPrefix      = "atproto.concrnt.world/follows/"
-	FollowNotifyKeyPrefix = "atproto.concrnt.world/follow-notify/"
-	SettingsKeySuffix     = "atproto.concrnt.world/settings"
+	InboxTimelineKey  = "atproto.concrnt.world/inbox"
+	InboxKeyPrefix    = InboxTimelineKey + "/"
+	FollowsKeyPrefix  = "atproto.concrnt.world/follows/"
+	SettingsKeySuffix = "atproto.concrnt.world/settings"
 )
 
 // Body-bearing message value shared by markdown/media/reply/reroute schemas.
@@ -89,10 +92,22 @@ type AtprotoSettings struct {
 	Enabled         *bool    `json:"enabled,omitempty"`
 }
 
-// AtprotoFollowNotify is the value of SchemaAtprotoFollowNotify, delivered to
-// a bridged user's notify timeline when a Bluesky account follows them.
+// AtprotoFollowNotify is the value of SchemaAtprotoFollowNotify: an
+// association on the bridged user's main profile, distributed to their
+// notify timeline when a Bluesky account follows them (the atproto analogue
+// of the native ack/follow.json notification).
 type AtprotoFollowNotify struct {
 	DID             string           `json:"did"`
+	ProfileOverride *ProfileOverride `json:"profileOverride,omitempty"`
+}
+
+// TargetAssociationValue is the value of a/reply.json and a/reroute.json
+// associations: TargetURI points at the mirrored body record (the reply or
+// quote/repost itself); the association is attached to the bridged user's
+// original post. Both schemas forbid additional properties, so this stays a
+// strict subset of them.
+type TargetAssociationValue struct {
+	TargetURI       string           `json:"targetURI"`
 	ProfileOverride *ProfileOverride `json:"profileOverride,omitempty"`
 }
 

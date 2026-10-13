@@ -72,19 +72,53 @@ func BuildRerouteDoc(serviceCCID, repostAtURI, targetCcURI string, override *wor
 	return doc
 }
 
-// FollowNotifyKey derives a stable key per (follower, subject) pair so a
-// refollow upserts the same record instead of accumulating documents.
-func FollowNotifyKey(serviceCCID, followerDID, subjectDID string) string {
-	return "cckv://" + serviceCCID + "/" + world.FollowNotifyKeyPrefix + cdid.MakeHash([]byte(followerDID+"->"+subjectDID)).String()
+// MainProfile is the main profile document of a concrnt user; follow
+// notifications associate to it (there is no post to attach them to).
+func MainProfile(ccid string) string {
+	return "cckv://" + ccid + "/concrnt.world/profiles/main"
 }
 
-// BuildFollowNotifyDoc notifies a bridged user that a Bluesky account followed
-// them. No follower state is materialized anywhere; this document is the whole
-// representation.
-func BuildFollowNotifyDoc(serviceCCID, followerDID, subjectDID string, override *world.ProfileOverride, distributes []string, createdAt time.Time) concrnt.Document[world.AtprotoFollowNotify] {
+// buildTargetAssociation attaches a reply/reroute notification to a bridged
+// user's post (targetCcURI); bodyKey is the mirrored record the notification
+// points at. Associations have no key and, like the ActivityPub bridge's,
+// no variant: the server dedupes them by (associate, author, schema, value).
+func buildTargetAssociation(schema, serviceCCID, targetCcURI, bodyKey string, override *world.ProfileOverride, distributes []string, createdAt time.Time) concrnt.Document[world.TargetAssociationValue] {
+	doc := concrnt.Document[world.TargetAssociationValue]{
+		Kind:   "association",
+		Schema: schema,
+		Value: world.TargetAssociationValue{
+			TargetURI:       bodyKey,
+			ProfileOverride: override,
+		},
+		Author:    serviceCCID,
+		CreatedAt: createdAt,
+		Associate: &targetCcURI,
+	}
+	if len(distributes) > 0 {
+		doc.Distributes = &distributes
+	}
+	return doc
+}
+
+// BuildReplyAssociation notifies the author of targetCcURI that a mirrored
+// bsky post (bodyKey) replied to it (a/reply.json, as the AP bridge does).
+func BuildReplyAssociation(serviceCCID, targetCcURI, bodyKey string, override *world.ProfileOverride, distributes []string, createdAt time.Time) concrnt.Document[world.TargetAssociationValue] {
+	return buildTargetAssociation(world.SchemaReplyAssociation, serviceCCID, targetCcURI, bodyKey, override, distributes, createdAt)
+}
+
+// BuildRerouteAssociation notifies the author of targetCcURI that a mirrored
+// bsky repost or quote (bodyKey) rerouted it (a/reroute.json).
+func BuildRerouteAssociation(serviceCCID, targetCcURI, bodyKey string, override *world.ProfileOverride, distributes []string, createdAt time.Time) concrnt.Document[world.TargetAssociationValue] {
+	return buildTargetAssociation(world.SchemaRerouteAssociation, serviceCCID, targetCcURI, bodyKey, override, distributes, createdAt)
+}
+
+// BuildFollowNotifyAssociation notifies a bridged user that a Bluesky account
+// followed them: an atproto/follow-notify.json association on their main
+// profile (profileURI), distributed to their notify timeline. No follower
+// state is materialized anywhere; this document is the whole representation.
+func BuildFollowNotifyAssociation(serviceCCID, followerDID, profileURI string, override *world.ProfileOverride, distributes []string, createdAt time.Time) concrnt.Document[world.AtprotoFollowNotify] {
 	doc := concrnt.Document[world.AtprotoFollowNotify]{
-		Kind:   "record",
-		Key:    FollowNotifyKey(serviceCCID, followerDID, subjectDID),
+		Kind:   "association",
 		Schema: world.SchemaAtprotoFollowNotify,
 		Value: world.AtprotoFollowNotify{
 			DID:             followerDID,
@@ -92,6 +126,7 @@ func BuildFollowNotifyDoc(serviceCCID, followerDID, subjectDID string, override 
 		},
 		Author:    serviceCCID,
 		CreatedAt: createdAt,
+		Associate: &profileURI,
 	}
 	if len(distributes) > 0 {
 		doc.Distributes = &distributes
@@ -132,13 +167,24 @@ func BuildDeleteDoc(serviceCCID, targetURI string) concrnt.Document[string] {
 	}
 }
 
-// PostRefs extracts the at-uris a post interacts with: reply parent/root and
-// quoted records. Used to detect interactions with bridged accounts.
-func PostRefs(record map[string]any) []string {
-	var refs []string
+// PostRefSet is the structured form of a post's interactions: the reply
+// parent and root, and the quoted record (embed.record / recordWithMedia).
+// Each is an at-uri or empty. Notifications use Parent (the post actually
+// replied to, as the ActivityPub bridge uses inReplyTo) and Quote; Root only
+// feeds the flat PostRefs listing.
+type PostRefSet struct {
+	Parent string
+	Root   string
+	Quote  string
+}
+
+// ParsePostRefs extracts the reply parent/root and quoted record at-uris of
+// a post record.
+func ParsePostRefs(record map[string]any) PostRefSet {
+	var refs PostRefSet
 	b, err := json.Marshal(record)
 	if err != nil {
-		return nil
+		return refs
 	}
 	var post struct {
 		Reply *struct {
@@ -161,22 +207,35 @@ func PostRefs(record map[string]any) []string {
 		} `json:"embed"`
 	}
 	if err := json.Unmarshal(b, &post); err != nil {
-		return nil
+		return refs
 	}
 	if post.Reply != nil {
-		if post.Reply.Parent.URI != "" {
-			refs = append(refs, post.Reply.Parent.URI)
-		}
-		if post.Reply.Root.URI != "" && post.Reply.Root.URI != post.Reply.Parent.URI {
-			refs = append(refs, post.Reply.Root.URI)
-		}
+		refs.Parent = post.Reply.Parent.URI
+		refs.Root = post.Reply.Root.URI
 	}
 	if post.Embed != nil && post.Embed.Record != nil {
 		if post.Embed.Record.URI != "" {
-			refs = append(refs, post.Embed.Record.URI)
-		} else if post.Embed.Record.Record != nil && post.Embed.Record.Record.URI != "" {
-			refs = append(refs, post.Embed.Record.Record.URI)
+			refs.Quote = post.Embed.Record.URI
+		} else if post.Embed.Record.Record != nil {
+			refs.Quote = post.Embed.Record.Record.URI
 		}
+	}
+	return refs
+}
+
+// PostRefs extracts the at-uris a post interacts with: reply parent/root and
+// quoted records. Used to detect interactions with bridged accounts.
+func PostRefs(record map[string]any) []string {
+	var refs []string
+	set := ParsePostRefs(record)
+	if set.Parent != "" {
+		refs = append(refs, set.Parent)
+	}
+	if set.Root != "" && set.Root != set.Parent {
+		refs = append(refs, set.Root)
+	}
+	if set.Quote != "" {
+		refs = append(refs, set.Quote)
 	}
 	return refs
 }

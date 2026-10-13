@@ -20,6 +20,34 @@ concrnt (v2) と Bluesky / atproto を双方向に接続するブリッジです
   サービスアカウントに allow-writers)で、**inbox 未作成のユーザーは配送先から
   外します**(配送しても policy deny で本体の DLQ に落ちるだけのため)。存在は
   起動時に1回取得し、以後は Redis イベントで追従します。
+  ブリッジ済みアカウント宛の通知(リプライ・引用・リポスト・いいね・フォロー)は
+  ActivityPub ブリッジと同じく **association だけ**を相手の notify タイムライン
+  (`cckv://<ccid>/concrnt.world/profiles/main/notify-timeline`)へ配送します。
+  本体 record(`atproto/record.json` / `m/reroute.json`)はサービス名前空間に置き、
+  配送先はフォロワーの inbox のみ(フォロワーがいなければ配送なし)です。
+  notify タイムラインは restrict-readers なので、そこへ record を配送すると
+  仮想親としてポリシーを継承し本人以外(他フォロワーの inbox・匿名パーマリンク)
+  から読めなくなるためです。association は associate 先(本人の投稿・プロフィール)を
+  根に評価されるのでこの問題がありません。
+
+  | Bluesky 側の操作 | notify タイムラインへの association | associate 先 |
+  |---|---|---|
+  | ブリッジ投稿へのリプライ(`reply.parent` のみ) | `a/reply.json`(`targetURI`=本体 record) | 元投稿 |
+  | ブリッジ投稿の引用(`embed.record`) | `a/reroute.json`(`targetURI`=本体 record) | 元投稿 |
+  | ブリッジ投稿のリポスト | `a/reroute.json`(`targetURI`=reroute record) | 元投稿 |
+  | ブリッジ投稿へのいいね | `a/like.json` | 元投稿 |
+  | ブリッジアカウントのフォロー | `atproto/follow-notify.json` | `profiles/main` |
+
+  いずれもブリッジが export した投稿(`at_uri_map` の `outbound-post`)宛てのものだけを
+  通知し、スレッドの root やブリッジ管理外の投稿宛ては通知しません。association の
+  ccfs は `at_uri_map` に `inbound-reply` / `inbound-reroute` / `inbound-follow` として
+  控え、Bluesky 側の削除(アンフォロー含む)で association も削除します。
+  **`at_uri_map` の主キーは `(at_uri, ref_type)` です**(1 投稿がリプライと引用を兼ねうる
+  ため)。`at_uri` 単独主キーだった既存 DB は AutoMigrate では変わらないので、手動で
+  `ALTER TABLE at_uri_map DROP CONSTRAINT at_uri_map_pkey, ADD PRIMARY KEY (at_uri, ref_type);`
+  を実行してください。旧方式で notify タイムラインに配送済みの record
+  (`atproto/follow-notify.json` record、`atproto.concrnt.world/follow-notify/` 配下)は
+  自動では掃除しません。
 
 ## 対応マッピング
 

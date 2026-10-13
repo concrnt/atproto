@@ -21,6 +21,7 @@ import (
 	"github.com/gorilla/websocket"
 	"gorm.io/gorm"
 
+	"github.com/concrnt/atproto/internal/convert/toconcrnt"
 	"github.com/concrnt/atproto/internal/store"
 )
 
@@ -228,7 +229,7 @@ func (c *Consumer) handleEvent(ctx context.Context, ev *Event) {
 		switch commit.Collection {
 		case "app.bsky.feed.post":
 			targets := c.bridgedRefs(commit.Record, bridged)
-			if isFollowed || len(targets) > 0 {
+			if isFollowed || targets.Parent != "" || targets.Quote != "" {
 				c.ingester.IngestPost(ctx, ev, isFollowed, targets)
 			}
 		case "app.bsky.feed.repost":
@@ -251,20 +252,24 @@ func (c *Consumer) handleEvent(ctx context.Context, ev *Event) {
 		// Gate the network-wide delete stream on the in-memory index of
 		// records we actually mirrored.
 		uri := atURI(ev)
-		if c.ingester.index.hasPost(uri) || c.ingester.index.hasLike(uri) {
+		if c.ingester.index.hasPost(uri) || c.ingester.index.hasLike(uri) || c.ingester.index.hasFollow(uri) {
 			c.ingester.IngestDelete(ctx, ev)
 		}
 	}
 }
 
-// bridgedRefs returns the at-uris in the post's reply/quote refs whose DIDs
-// belong to bridged accounts.
-func (c *Consumer) bridgedRefs(record map[string]any, bridged map[string]bool) []string {
-	var out []string
-	for _, ref := range postRefs(record) {
-		if bridged[didOfATURI(ref)] {
-			out = append(out, ref)
-		}
+// bridgedRefs returns the post's reply parent and quoted record, keeping
+// only those whose DIDs belong to bridged accounts (others are blanked).
+// Only the direct parent counts as a reply target, as the ActivityPub bridge
+// only looks at inReplyTo; the thread root never triggers a notification.
+func (c *Consumer) bridgedRefs(record map[string]any, bridged map[string]bool) toconcrnt.PostRefSet {
+	out := postRefs(record)
+	out.Root = ""
+	if !bridged[didOfATURI(out.Parent)] {
+		out.Parent = ""
+	}
+	if !bridged[didOfATURI(out.Quote)] {
+		out.Quote = ""
 	}
 	return out
 }

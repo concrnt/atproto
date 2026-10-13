@@ -1,7 +1,7 @@
 package toconcrnt
 
 import (
-	"strings"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -60,39 +60,84 @@ func TestSubjectExtraction(t *testing.T) {
 	}
 }
 
-func TestFollowNotifyKeyDeterminism(t *testing.T) {
-	a := FollowNotifyKey("con1svc", "did:plc:follower", "did:plc:subject")
-	b := FollowNotifyKey("con1svc", "did:plc:follower", "did:plc:subject")
-	if a != b {
-		t.Errorf("same pair must derive the same key: %s vs %s", a, b)
+func TestParsePostRefsSeparatesParentRootQuote(t *testing.T) {
+	record := map[string]any{
+		"reply": map[string]any{
+			"parent": map[string]any{"uri": "at://did:plc:a/app.bsky.feed.post/1"},
+			"root":   map[string]any{"uri": "at://did:plc:b/app.bsky.feed.post/2"},
+		},
+		"embed": map[string]any{
+			"$type":  "app.bsky.embed.record",
+			"record": map[string]any{"uri": "at://did:plc:c/app.bsky.feed.post/3"},
+		},
 	}
-	if !strings.HasPrefix(a, "cckv://con1svc/atproto.concrnt.world/follow-notify/") {
-		t.Errorf("unexpected key namespace: %s", a)
+	refs := ParsePostRefs(record)
+	if refs.Parent != "at://did:plc:a/app.bsky.feed.post/1" || refs.Root != "at://did:plc:b/app.bsky.feed.post/2" || refs.Quote != "at://did:plc:c/app.bsky.feed.post/3" {
+		t.Fatalf("got %+v", refs)
 	}
-	if c := FollowNotifyKey("con1svc", "did:plc:other", "did:plc:subject"); c == a {
-		t.Errorf("different follower must derive a different key")
-	}
-	if c := FollowNotifyKey("con1svc", "did:plc:follower", "did:plc:other"); c == a {
-		t.Errorf("different subject must derive a different key")
+	if plain := ParsePostRefs(map[string]any{"text": "hi"}); plain != (PostRefSet{}) {
+		t.Fatalf("plain post must have no refs: %+v", plain)
 	}
 }
 
-func TestBuildFollowNotifyDoc(t *testing.T) {
+// Notification associations must be shaped like the ActivityPub bridge's:
+// no key, no variant, associate = the bridged user's resource, and a value
+// restricted to what the a/reply.json / a/reroute.json schemas allow.
+func TestNotificationAssociationShapes(t *testing.T) {
 	now := time.Now()
-	override := &world.ProfileOverride{Username: "alice"}
-	doc := BuildFollowNotifyDoc("con1svc", "did:plc:follower", "did:plc:subject", override,
-		[]string{"cckv://con1u/concrnt.world/profiles/main/notify-timeline"}, now)
-	if doc.Kind != "record" || doc.Schema != world.SchemaAtprotoFollowNotify {
-		t.Errorf("bad doc %+v", doc)
+	override := &world.ProfileOverride{Username: "alice", Link: "https://bsky.app/profile/alice.test"}
+	notify := []string{"cckv://con1u/concrnt.world/profiles/main/notify-timeline"}
+
+	reply := BuildReplyAssociation("con1svc", "cckv://con1u/concrnt.world/profiles/main/posts/p1", "cckv://con1svc/atproto.concrnt.world/inbox/x", override, notify, now)
+	if reply.Kind != "association" || reply.Schema != world.SchemaReplyAssociation || reply.Key != "" {
+		t.Errorf("bad reply doc %+v", reply)
 	}
-	if doc.Key != FollowNotifyKey("con1svc", "did:plc:follower", "did:plc:subject") {
-		t.Errorf("key mismatch: %s", doc.Key)
+	if reply.Associate == nil || *reply.Associate != "cckv://con1u/concrnt.world/profiles/main/posts/p1" {
+		t.Errorf("bad associate %+v", reply.Associate)
 	}
-	if doc.Value.DID != "did:plc:follower" || doc.Value.ProfileOverride != override {
-		t.Errorf("bad value %+v", doc.Value)
+	if reply.AssociationVariant != nil {
+		t.Errorf("reply must carry no variant")
 	}
-	if doc.Author != "con1svc" || doc.Distributes == nil || len(*doc.Distributes) != 1 {
-		t.Errorf("bad author/distributes %+v", doc)
+	if reply.Value.TargetURI != "cckv://con1svc/atproto.concrnt.world/inbox/x" || reply.Value.ProfileOverride != override {
+		t.Errorf("bad value %+v", reply.Value)
+	}
+	if reply.Distributes == nil || len(*reply.Distributes) != 1 || (*reply.Distributes)[0] != notify[0] {
+		t.Errorf("bad distributes %+v", reply.Distributes)
+	}
+	var raw map[string]any
+	b, _ := json.Marshal(reply)
+	_ = json.Unmarshal(b, &raw)
+	if _, has := raw["key"]; !has {
+		// Document always serializes key; the server requires it empty
+		t.Errorf("unexpected serialization: %s", b)
+	}
+	value := raw["value"].(map[string]any)
+	for k := range value {
+		if k != "targetURI" && k != "profileOverride" {
+			t.Errorf("value carries field %q not allowed by a/reply.json: %s", k, b)
+		}
+	}
+
+	reroute := BuildRerouteAssociation("con1svc", "cckv://con1u/concrnt.world/profiles/main/posts/p1", "cckv://con1svc/atproto.concrnt.world/inbox/y", nil, notify, now)
+	if reroute.Schema != world.SchemaRerouteAssociation || reroute.Kind != "association" {
+		t.Errorf("bad reroute doc %+v", reroute)
+	}
+	if reroute.Value.ProfileOverride != nil {
+		t.Errorf("nil override must stay nil")
+	}
+
+	follow := BuildFollowNotifyAssociation("con1svc", "did:plc:follower", MainProfile("con1u"), override, notify, now)
+	if follow.Kind != "association" || follow.Schema != world.SchemaAtprotoFollowNotify || follow.Key != "" {
+		t.Errorf("bad follow doc %+v", follow)
+	}
+	if follow.Associate == nil || *follow.Associate != "cckv://con1u/concrnt.world/profiles/main" {
+		t.Errorf("bad associate %+v", follow.Associate)
+	}
+	if follow.Value.DID != "did:plc:follower" || follow.Value.ProfileOverride != override {
+		t.Errorf("bad value %+v", follow.Value)
+	}
+	if follow.Author != "con1svc" || follow.Distributes == nil || len(*follow.Distributes) != 1 {
+		t.Errorf("bad author/distributes %+v", follow)
 	}
 }
 
