@@ -123,7 +123,7 @@ func run() error {
 
 	// Inbound: Jetstream → concrnt commits.
 	ingester := inbound.NewIngester(db, coreSvc, av,
-		time.Duration(cfg.Atproto.ActorCacheTTLMinutes)*time.Minute)
+		time.Duration(cfg.Atproto.ActorCacheTTLMinutes)*time.Minute, daemon.Inboxes())
 	consumer := inbound.NewConsumer(db, cfg.Atproto.Jetstream, ingester, reload)
 	go consumer.Run(ctx)
 

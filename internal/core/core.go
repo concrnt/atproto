@@ -183,6 +183,10 @@ func IsNotFound(err error) bool {
 func QueryAllByPrefix(ctx context.Context, s *Service, prefix string, schema string) (docs []concrnt.Document[json.RawMessage], complete bool, err error) {
 	byKey := map[string]concrnt.Document[json.RawMessage]{}
 	var since *time.Time
+	// The server's cursor is the RFC3339Nano createdAt of the first row past
+	// the page (orderby=key is never used here, so no cckv cursors). It is
+	// kept verbatim for the stall check and parsed back into Since.
+	var lastCursor string
 	complete = true
 	for {
 		page, err := s.Client.Query(ctx, s.fqdn, client.QueryParams{
@@ -211,12 +215,18 @@ func QueryAllByPrefix(ctx context.Context, s *Service, prefix string, schema str
 		if page.Next == nil {
 			break
 		}
-		if since != nil && page.Next.Equal(*since) {
-			slog.Warn("query cursor stalled; listing may be incomplete", "prefix", prefix, "cursor", *since)
+		if *page.Next == lastCursor {
+			slog.Warn("query cursor stalled; listing may be incomplete", "prefix", prefix, "cursor", lastCursor)
 			complete = false
 			break
 		}
-		next := *page.Next
+		next, err := time.Parse(time.RFC3339Nano, *page.Next)
+		if err != nil {
+			slog.Warn("unparsable query cursor; listing may be incomplete", "prefix", prefix, "cursor", *page.Next, "error", err)
+			complete = false
+			break
+		}
+		lastCursor = *page.Next
 		since = &next
 	}
 	docs = make([]concrnt.Document[json.RawMessage], 0, len(byKey))

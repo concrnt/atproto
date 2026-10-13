@@ -21,6 +21,15 @@ import (
 func postRefs(record map[string]any) []string { return toconcrnt.PostRefs(record) }
 func subjectURI(record map[string]any) string { return toconcrnt.SubjectURI(record) }
 
+// InboxChecker answers whether a bridged user's inbox timeline exists (the
+// outbound daemon's InboxStore; an interface here so inbound does not import
+// outbound). Delivery to a missing inbox is refused by policy on the core
+// and only ends up in its dead-letter queue, so such recipients are dropped.
+type InboxChecker interface {
+	Has(ccid string) bool
+	EnsureLoaded(ctx context.Context, ccid string) error
+}
+
 // Ingester turns filtered Jetstream events into concrnt commits.
 type Ingester struct {
 	db       *gorm.DB
@@ -28,10 +37,11 @@ type Ingester struct {
 	appview  *appview.Client
 	actorTTL time.Duration
 	index    *liveIndex
+	inboxes  InboxChecker
 }
 
-func NewIngester(db *gorm.DB, coreSvc *core.Service, av *appview.Client, actorTTL time.Duration) *Ingester {
-	return &Ingester{db: db, core: coreSvc, appview: av, actorTTL: actorTTL, index: newLiveIndex()}
+func NewIngester(db *gorm.DB, coreSvc *core.Service, av *appview.Client, actorTTL time.Duration, inboxes InboxChecker) *Ingester {
+	return &Ingester{db: db, core: coreSvc, appview: av, actorTTL: actorTTL, index: newLiveIndex(), inboxes: inboxes}
 }
 
 func atURI(ev *Event) string {
@@ -89,18 +99,27 @@ func (g *Ingester) profileOverride(ctx context.Context, did string) *world.Profi
 }
 
 // followerInboxes returns the inbox timelines of every bridged user
-// following did.
+// following did, leaving out users whose inbox timeline does not exist yet
+// (lazily loaded, so a follower picked up before the daemon's sync tick is
+// still checked).
 //
 // TODO: with enough bridged followers of one actor (~400) the resulting
 // distributes list pushes the signed document past the server's 32KiB
 // document limit and the whole commit fails; needs batched commits.
-func (g *Ingester) followerInboxes(did string) []string {
+func (g *Ingester) followerInboxes(ctx context.Context, did string) []string {
 	var follows []store.Follow
 	if err := g.db.Where("subject_did = ?", did).Find(&follows).Error; err != nil {
 		return nil
 	}
 	var inboxes []string
 	for _, f := range follows {
+		if err := g.inboxes.EnsureLoaded(ctx, f.CCID); err != nil {
+			slog.Error("failed to load inbox state", "ccid", f.CCID, "error", err)
+		}
+		if !g.inboxes.Has(f.CCID) {
+			slog.Debug("skipping delivery: no inbox timeline", "ccid", f.CCID, "subject", did)
+			continue
+		}
 		inboxes = append(inboxes, toconcrnt.InboxTimeline(f.CCID))
 	}
 	return inboxes
@@ -122,7 +141,7 @@ func (g *Ingester) IngestPost(ctx context.Context, ev *Event, isFollowed bool, b
 
 	var distributes []string
 	if isFollowed {
-		distributes = append(distributes, g.followerInboxes(ev.DID)...)
+		distributes = append(distributes, g.followerInboxes(ctx, ev.DID)...)
 	}
 	for _, target := range bridgedTargets {
 		if nt := g.notifyTimelineOfDID(didOfATURI(target)); nt != "" {
@@ -194,7 +213,7 @@ func (g *Ingester) IngestRepost(ctx context.Context, ev *Event, isFollowed, subj
 
 	var distributes []string
 	if isFollowed {
-		distributes = append(distributes, g.followerInboxes(ev.DID)...)
+		distributes = append(distributes, g.followerInboxes(ctx, ev.DID)...)
 	}
 	if subjectBridged {
 		if nt := g.notifyTimelineOfDID(didOfATURI(subjURI)); nt != "" {

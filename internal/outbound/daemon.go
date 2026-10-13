@@ -22,6 +22,7 @@ import (
 
 	"github.com/concrnt/atproto/internal/blobs"
 	"github.com/concrnt/atproto/internal/convert/tobsky"
+	"github.com/concrnt/atproto/internal/convert/toconcrnt"
 	"github.com/concrnt/atproto/internal/core"
 	"github.com/concrnt/atproto/internal/repoman"
 	"github.com/concrnt/atproto/internal/store"
@@ -41,6 +42,7 @@ type Daemon struct {
 	reloadInterval time.Duration
 
 	settings *SettingsStore
+	inboxes  *InboxStore
 
 	mu       sync.RWMutex
 	entities []store.Entity
@@ -61,10 +63,15 @@ func NewDaemon(db *gorm.DB, coreSvc *core.Service, repos *repoman.Manager, blobS
 		postURL:        postURLTemplate,
 		reloadInterval: reloadInterval,
 		settings:       NewSettingsStore(coreSvc),
+		inboxes:        NewInboxStore(coreSvc),
 		outboundLikes:  map[string]bool{},
 		reconciled:     map[string]bool{},
 	}
 }
+
+// Inboxes exposes the inbox existence cache the daemon keeps current from
+// the event stream; inbound delivery filters its recipients through it.
+func (d *Daemon) Inboxes() *InboxStore { return d.inboxes }
 
 func (d *Daemon) reload() {
 	var ents []store.Entity
@@ -102,6 +109,9 @@ func (d *Daemon) syncStores(ctx context.Context) {
 	}
 	for i := range ents {
 		ent := &ents[i]
+		if err := d.inboxes.EnsureLoaded(ctx, ent.CCID); err != nil {
+			slog.Warn("failed to load inbox state", "ccid", ent.CCID, "error", err)
+		}
 		if err := d.settings.EnsureLoaded(ctx, ent.CCID); err != nil {
 			slog.Warn("failed to load settings record", "ccid", ent.CCID, "error", err)
 			continue
@@ -189,6 +199,12 @@ func (d *Daemon) dispatch(ctx context.Context, ev core.ChannelEvent) {
 			d.settings.ApplyEvent(ctx, entity.CCID, ev.Event)
 			d.syncEnabledColumn(entity)
 			continue
+		}
+
+		// Inbox existence is tracked regardless of the enabled flag so a
+		// re-enabled user delivers correctly right away.
+		if channel == toconcrnt.InboxTimeline(entity.CCID) {
+			d.inboxes.ApplyEvent(entity.CCID, ev.Event)
 		}
 
 		timelines, enabled := d.settings.Get(entity.CCID)

@@ -1,0 +1,6 @@
+# local workspace wiring (../concrnt is outside the build context)
+go.work
+go.work.sum
+# local runtime state
+config.yaml
+data/

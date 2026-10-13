@@ -4,13 +4,14 @@ go 1.26.4
 
 require (
 	github.com/bluesky-social/indigo v0.0.0-20260629160527-dfe5578fd537
-	github.com/concrnt/concrnt v1.10.23
+	github.com/concrnt/concrnt v1.11.7
 	github.com/did-method-plc/go-didplc v0.2.2
 	github.com/glebarez/sqlite v1.11.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/ipfs/go-cid v0.6.2
 	github.com/labstack/echo/v4 v4.13.4
 	github.com/multiformats/go-multihash v0.2.3
+	github.com/prometheus/client_golang v1.23.2
 	github.com/redis/go-redis/v9 v9.17.2
 	github.com/rivo/uniseg v0.4.7
 	github.com/whyrusleeping/cbor-gen v0.3.1
@@ -140,7 +141,6 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/polydawn/refmt v0.89.1-0.20221221234430-40501e09de1f // indirect
-	github.com/prometheus/client_golang v1.23.2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.69.0 // indirect
 	github.com/prometheus/procfs v0.19.2 // indirect

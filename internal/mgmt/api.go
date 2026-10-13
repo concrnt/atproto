@@ -14,6 +14,7 @@ import (
 	"github.com/bluesky-social/indigo/atproto/identity"
 	"github.com/bluesky-social/indigo/atproto/syntax"
 	"github.com/labstack/echo/v4"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gorm.io/gorm"
 
 	"github.com/concrnt/atproto/internal/appview"
@@ -87,6 +88,13 @@ func (s *Server) SetResolver(r HandleResolver) { s.resolver = r }
 // be reachable through the concrnt gateway.
 func (s *Server) Register(e *echo.Echo) {
 	e.GET("/cc-info", s.handleCCInfo)
+	// Operational endpoints. The gateway only proxies /atproto and /xrpc, so
+	// these stay off the public origin: /health is the liveness probe and
+	// /metrics is scraped on the pod port directly. The default registry
+	// carries the Go/process collectors plus the concrnt client's peer
+	// request series (registered by the client package itself).
+	e.GET("/health", handleHealth)
+	e.GET("/metrics", echo.WrapHandler(promhttp.Handler()))
 	e.GET("/atproto/api/info", s.handleInfo)
 	e.POST("/atproto/api/setup", s.handleSetup)
 	e.POST("/atproto/api/verify", s.handleVerify)
@@ -109,6 +117,10 @@ func requester(c echo.Context) string {
 		return ""
 	}
 	return ent.CCID
+}
+
+func handleHealth(c echo.Context) error {
+	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *Server) handleCCInfo(c echo.Context) error {

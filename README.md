@@ -15,6 +15,11 @@ concrnt (v2) と Bluesky / atproto を双方向に接続するブリッジです
   取り込みます。投稿本文はコピーせず、軽量参照スキーマ
   `atproto/record.json` (`{did, atUri, cid, profileOverride}`) として配送し、
   表示時にクライアントが解決します(ap/note.json と同じ方式)。
+  フォロー中ユーザーの投稿の配送先は各ユーザーの inbox タイムライン
+  `cckv://<ccid>/atproto.concrnt.world/inbox`(アプリ側がユーザー署名で作成、
+  サービスアカウントに allow-writers)で、**inbox 未作成のユーザーは配送先から
+  外します**(配送しても policy deny で本体の DLQ に落ちるだけのため)。存在は
+  起動時に1回取得し、以後は Redis イベントで追従します。
 
 ## 対応マッピング
 
@@ -133,10 +138,9 @@ services:
     noAuth: true
 ```
 
-> **前提**: concrnt 本体の `internal/present/rest/proxy.go` に、プロキシ
-> ハンドラ冒頭で `cc-requester` / `cc-requester-tag` ヘッダを常に `Del` する
-> 修正が必要です(未認証パス経由でのヘッダ偽装防止)。この修正は本ブリッジと
-> 同じ変更セットに含まれます。
+> **前提**: concrnt 本体 v1.10.23 以降(ゲートウェイのプロキシが
+> `cc-requester` / `cc-requester-tag` ヘッダを常に削除してから付け直す版。
+> 未認証パス経由でのヘッダ偽装防止)。go.mod の pin はこれより新しい版です。
 >
 > **firehose(WebSocket)**は concrnt ゲートウェイの ReverseProxy を通ります。
 > Go の ReverseProxy は Upgrade を透過しますが、本体は WS プロキシの実績が
@@ -147,6 +151,14 @@ services:
 
 `config.example.yaml` をコピーして編集し、`CONFIG_PATH` で指定します
 (既定 `/app/config.yaml`)。マイグレーションは起動時に自動実行されます。
+
+### 運用エンドポイント(ゲートウェイ非経由)
+
+同じポートで `GET /health`(liveness、`{"status":"ok"}`)と `GET /metrics`
+(Prometheus: Go/process 標準系列+concrnt クライアントの peer リクエスト系列)
+を配信します。ゲートウェイは `/atproto` と `/xrpc` しか転送しないため公開
+オリジンには出ず、PodMonitor 等からブリッジのポートを直接 scrape してください
+(ActivityPub ブリッジと同じ運用)。
 
 ## 管理API(concrnt ゲートウェイ経由)
 
