@@ -150,7 +150,18 @@ func run() error {
 	// (/cc-info, /atproto/api). The bridge must not be exposed directly.
 	e := newEcho()
 
-	pds.NewServer(db, repos, blobSvc, pdsHost, version).Register(e)
+	pdsSrv := pds.NewServer(db, repos, blobSvc, pdsHost, version)
+	pdsSrv.OnFreshConsumer = func(ctx context.Context) {
+		n, err := repos.AnnounceActiveAccounts(ctx)
+		if err != nil {
+			slog.Error("failed to announce accounts to new firehose consumer", "error", err)
+			return
+		}
+		if n > 0 {
+			slog.Info("announced active accounts to new firehose consumer", "count", n)
+		}
+	}
+	pdsSrv.Register(e)
 
 	mgmtSrv := mgmt.NewServer(db, repos, av, pdsHost, cfg.Atproto.Relays, version, cfg.Concrnt.CCID)
 	mgmtSrv.OnProfileInit = func(ctx context.Context, ent *store.Entity) {

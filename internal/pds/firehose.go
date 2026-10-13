@@ -98,6 +98,13 @@ func (s *Server) handleSubscribeRepos(c echo.Context) error {
 
 	slog.Info("new firehose consumer", "remote", c.RealIP(), "ua", c.Request().UserAgent(), "cursor", since)
 
+	// A cursor-less consumer starts at the live position and has no way to
+	// learn about accounts whose events it missed; announce them now that
+	// the subscription is in place so the events reach this consumer.
+	if since == nil && s.OnFreshConsumer != nil {
+		s.OnFreshConsumer(ctx)
+	}
+
 	for {
 		select {
 		case evt, ok := <-evts:

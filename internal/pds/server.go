@@ -7,6 +7,7 @@
 package pds
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 
@@ -24,6 +25,11 @@ type Server struct {
 	blobs   *blobs.Service
 	pdsHost string // concrnt FQDN; the atproto serviceEndpoint origin
 	version string
+
+	// OnFreshConsumer is called when a firehose consumer subscribes without
+	// a cursor (a relay's first connection to this host). The bridge uses it
+	// to re-announce the active accounts, see repoman.AnnounceActiveAccounts.
+	OnFreshConsumer func(ctx context.Context)
 }
 
 func NewServer(db *gorm.DB, repos *repoman.Manager, blobSvc *blobs.Service, pdsHost, version string) *Server {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bluesky-social/indigo/atproto/atcrypto"
+	"github.com/bluesky-social/indigo/events"
 	"github.com/glebarez/sqlite"
 	"github.com/labstack/echo/v4"
 	"gorm.io/gorm"
@@ -177,5 +178,72 @@ func TestSetupRequiresAuth(t *testing.T) {
 	e.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("missing cc-requester should 401, got %d", rec.Code)
+	}
+}
+
+func TestAnnounceRequiresActiveAccount(t *testing.T) {
+	srv, fr, _ := setupServer(t)
+	e := echo.New()
+	srv.Register(e)
+
+	// Not bridged → 404; pending → 409; active → 200 with #identity/#account.
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, authedReq(http.MethodPost, "/atproto/api/announce", ``, "con1nobody"))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unbridged announce status %d: %s", rec.Code, rec.Body)
+	}
+
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, authedReq(http.MethodPost, "/atproto/api/setup", `{"handle":"carol.example.com"}`, "con1carol"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("setup status %d: %s", rec.Code, rec.Body)
+	}
+	var setupResp struct {
+		DID string `json:"did"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &setupResp)
+
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, authedReq(http.MethodPost, "/atproto/api/announce", ``, "con1carol"))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("pending announce status %d: %s", rec.Code, rec.Body)
+	}
+
+	fr.table["carol.example.com"] = setupResp.DID
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, authedReq(http.MethodPost, "/atproto/api/verify", ``, "con1carol"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("verify status %d: %s", rec.Code, rec.Body)
+	}
+
+	ctx := context.Background()
+	evts, cancel, err := srv.repos.Events().Subscribe(ctx, "test", func(*events.XRPCStreamEvent) bool { return true }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, authedReq(http.MethodPost, "/atproto/api/announce", ``, "con1carol"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("announce status %d: %s", rec.Code, rec.Body)
+	}
+	var kinds []string
+	deadline := time.After(5 * time.Second)
+	for len(kinds) < 2 {
+		select {
+		case evt := <-evts:
+			switch {
+			case evt.RepoIdentity != nil && evt.RepoIdentity.Did == setupResp.DID:
+				kinds = append(kinds, "identity")
+			case evt.RepoAccount != nil && evt.RepoAccount.Did == setupResp.DID:
+				kinds = append(kinds, "account")
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for announce events, got %v", kinds)
+		}
+	}
+	if kinds[0] != "identity" || kinds[1] != "account" {
+		t.Fatalf("event order %v", kinds)
 	}
 }

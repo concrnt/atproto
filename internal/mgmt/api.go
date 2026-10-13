@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bluesky-social/indigo/atproto/identity"
 	"github.com/bluesky-social/indigo/atproto/syntax"
@@ -98,6 +99,7 @@ func (s *Server) Register(e *echo.Echo) {
 	e.GET("/atproto/api/info", s.handleInfo)
 	e.POST("/atproto/api/setup", s.handleSetup)
 	e.POST("/atproto/api/verify", s.handleVerify)
+	e.POST("/atproto/api/announce", s.handleAnnounce)
 	e.GET("/atproto/api/following", s.handleFollowing)
 	e.GET("/atproto/api/followers", s.handleFollowers)
 	e.GET("/atproto/api/resolve-actor", s.handleResolveActor)
@@ -131,6 +133,7 @@ func (s *Server) handleCCInfo(c echo.Context) error {
 			ServiceName + ".info":         "/atproto/api/info",
 			ServiceName + ".setup":        "/atproto/api/setup",
 			ServiceName + ".verify":       "/atproto/api/verify",
+			ServiceName + ".announce":     "/atproto/api/announce",
 			ServiceName + ".following":    "/atproto/api/following",
 			ServiceName + ".followers":    "/atproto/api/followers{?limit,cursor}",
 			ServiceName + ".resolveActor": "/atproto/api/resolve-actor{?target}",
@@ -244,16 +247,44 @@ func (s *Server) handleVerify(c echo.Context) error {
 		})
 	}
 
+	// Ask the relays to subscribe before the activation events are emitted:
+	// a relay only receives events from the moment it connects, so for this
+	// host's first account the #identity/#account/#commit would otherwise
+	// precede the relay. The cursor-less-consumer re-announcement
+	// (repoman.AnnounceActiveAccounts) covers the remaining connect latency.
+	crawlCtx, cancelCrawl := context.WithTimeout(ctx, 10*time.Second)
+	relay.RequestCrawl(crawlCtx, s.relays, s.pdsHost)
+	cancelCrawl()
+
 	if err := s.repos.Activate(ctx, ent.DID); err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 
-	go relay.RequestCrawl(context.Background(), s.relays, s.pdsHost)
 	if s.OnProfileInit != nil {
 		go s.OnProfileInit(context.Background(), ent)
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{"did": ent.DID, "handle": ent.Handle, "status": "active"})
+}
+
+// handleAnnounce re-broadcasts the caller's #identity/#account on the
+// firehose and re-requests a relay crawl. For when the appview shows
+// handle.invalid (its handle check failed or ran before DNS propagated) or a
+// relay missed the activation: the appview re-verifies on #identity.
+func (s *Server) handleAnnounce(c echo.Context) error {
+	ent, err := s.entityOfRequester(c)
+	if ent == nil {
+		return err
+	}
+	if ent.Status != "active" {
+		return c.JSON(http.StatusConflict, map[string]string{"error": "account is not active; call verify first"})
+	}
+	ctx := c.Request().Context()
+	if err := s.repos.AnnounceAccount(ctx, ent.DID); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	go relay.RequestCrawl(context.Background(), s.relays, s.pdsHost)
+	return c.JSON(http.StatusOK, map[string]any{"did": ent.DID, "handle": ent.Handle, "status": ent.Status})
 }
 
 func (s *Server) entityOfRequester(c echo.Context) (*store.Entity, error) {

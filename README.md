@@ -142,6 +142,12 @@ services:
 > `cc-requester` / `cc-requester-tag` ヘッダを常に削除してから付け直す版。
 > 未認証パス経由でのヘッダ偽装防止)。go.mod の pin はこれより新しい版です。
 >
+> **relay への周知**: relay も appview もアカウントを firehose イベントからしか学習せず、
+> 新規購読した relay は現在位置から読み始めて過去分をバックフィルしません。そのため
+> verify では先に requestCrawl してから activation イベントを流し、さらに cursor 無しで
+> 接続してきた購読者(= relay の初回接続)には active な全アカウントの `#identity`/`#account`
+> を再送します(1分に1回まで)。手動のやり直しは `POST /atproto/api/announce` です。
+>
 > **firehose(WebSocket)**は concrnt ゲートウェイの ReverseProxy を通ります。
 > Go の ReverseProxy は Upgrade を透過しますが、本体は WS プロキシの実績が
 > ないため、デプロイ時に `wss://<concrnt>/xrpc/com.atproto.sync.subscribeRepos`
@@ -173,7 +179,8 @@ volume で同じディレクトリに重ねる想定です(concrnt 本体・Acti
 | エンドポイント | 説明 |
 |---|---|
 | `POST /atproto/api/setup {handle}` | 登録1段階目: 持ち込みドメインで did:plc 発番、status=pending。検証手順を返す |
-| `POST /atproto/api/verify` | 登録2段階目: handle の DNS/well-known 検証成功で active 化(repo 初期化・crawl) |
+| `POST /atproto/api/verify` | 登録2段階目: handle の DNS/well-known 検証成功で active 化(relay へ requestCrawl → repo 初期化) |
+| `POST /atproto/api/announce` | 自分の `#identity`/`#account` を firehose に再送し requestCrawl もやり直す。appview が `handle.invalid` を表示している(DNS 反映前に検証された)時や relay が activation を取りこぼした時に使う |
 | `GET /atproto/api/info` | ブリッジ情報 + 自分のエンティティ状態 |
 | `GET /atproto/api/following` | フォロー中の Bluesky アカウント一覧 |
 | `GET /atproto/api/resolve-actor?target=` | handle/DID → プロフィールプレビュー |

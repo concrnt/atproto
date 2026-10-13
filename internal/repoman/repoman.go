@@ -40,7 +40,14 @@ type Manager struct {
 
 	mu       sync.RWMutex
 	didByUid map[models.Uid]string
+
+	announceMu   sync.Mutex
+	lastAnnounce time.Time
 }
+
+// announceInterval throttles AnnounceActiveAccounts: a relay connects without
+// a cursor once, but dev tools (goat firehose) may reconnect repeatedly.
+const announceInterval = time.Minute
 
 func New(db *gorm.DB, dataDir string, ks *keys.Service, plc *plcm.Service, retention time.Duration) (*Manager, error) {
 	cs, err := carstore.NewCarStore(db, []string{filepath.Join(dataDir, "carstore")})
@@ -160,6 +167,55 @@ func (m *Manager) EmitAccount(ctx context.Context, did string, active bool, stat
 	})
 }
 
+// AnnounceAccount re-broadcasts #identity and #account for an active account.
+// Relays and the appview only learn about an account from firehose events,
+// so this is how a consumer that missed the activation events (or whose
+// handle verification failed at the time) gets told again.
+func (m *Manager) AnnounceAccount(ctx context.Context, did string) error {
+	ent, err := m.entityByDID(did)
+	if err != nil {
+		return err
+	}
+	if ent.Status != "active" {
+		return fmt.Errorf("account %s is not active", did)
+	}
+	if err := m.EmitIdentity(ctx, did, ent.Handle); err != nil {
+		return err
+	}
+	return m.EmitAccount(ctx, did, true, nil)
+}
+
+// AnnounceActiveAccounts re-broadcasts #identity/#account for every active
+// account, throttled to once per announceInterval. It is called when a
+// firehose consumer connects without a cursor: a newly subscribed relay
+// starts at the live position and never backfills, so events emitted
+// before it connected (in particular this host's first activation, which
+// precedes the relay's own requestCrawl round-trip) are otherwise lost.
+// Returns the number of accounts announced (0 when throttled).
+func (m *Manager) AnnounceActiveAccounts(ctx context.Context) (int, error) {
+	m.announceMu.Lock()
+	if time.Since(m.lastAnnounce) < announceInterval {
+		m.announceMu.Unlock()
+		return 0, nil
+	}
+	m.lastAnnounce = time.Now()
+	m.announceMu.Unlock()
+
+	var ents []store.Entity
+	if err := m.db.Where("status = ? AND did <> ''", "active").Find(&ents).Error; err != nil {
+		return 0, err
+	}
+	for _, ent := range ents {
+		if err := m.EmitIdentity(ctx, ent.DID, ent.Handle); err != nil {
+			return 0, err
+		}
+		if err := m.EmitAccount(ctx, ent.DID, true, nil); err != nil {
+			return 0, err
+		}
+	}
+	return len(ents), nil
+}
+
 // CreatePending provisions a bridged account up to (but not including)
 // activation: a signing key, a did:plc that claims `handle` as its
 // alsoKnownAs, and a pending entity row. No repo, firehose event, or relay
@@ -277,19 +333,41 @@ func (m *Manager) CreateRecord(ctx context.Context, did, collection string, rec 
 }
 
 // PutRecord upserts a record at a fixed rkey (e.g. actor profile "self").
-// repomgr.UpdateRecord is an MST put, so it works whether or not the record
-// already exists; the firehose op reads as "update" which is fine for our
-// only fixed-rkey use (the profile, created by InitNewActor).
+// Every repomgr write path (UpdateRecord, BatchWrite update) ends in
+// mst.Add, which fails with "value already set" when the key exists, so an
+// existing record is replaced as delete+put inside one BatchWrite commit:
+// a single firehose #commit whose ops read delete then update for the path.
 func (m *Manager) PutRecord(ctx context.Context, did, collection, rkey string, rec cbg.CBORMarshaler) (string, string, error) {
 	ent, err := m.entityByDID(did)
 	if err != nil {
 		return "", "", err
 	}
-	cc, err := m.mgr.UpdateRecord(ctx, ent.Uid, collection, rkey, rec)
+	atURI := "at://" + did + "/" + collection + "/" + rkey
+
+	if _, _, err := m.mgr.GetRecord(ctx, ent.Uid, collection, rkey, cid.Undef); err != nil {
+		cc, err := m.mgr.UpdateRecord(ctx, ent.Uid, collection, rkey, rec)
+		if err != nil {
+			return "", "", err
+		}
+		return atURI, cc.String(), nil
+	}
+
+	writes := []*comatproto.RepoApplyWrites_Input_Writes_Elem{
+		{RepoApplyWrites_Delete: &comatproto.RepoApplyWrites_Delete{Collection: collection, Rkey: rkey}},
+		{RepoApplyWrites_Update: &comatproto.RepoApplyWrites_Update{
+			Collection: collection,
+			Rkey:       rkey,
+			Value:      &lexutil.LexiconTypeDecoder{Val: rec},
+		}},
+	}
+	if err := m.mgr.BatchWrite(ctx, ent.Uid, writes); err != nil {
+		return "", "", err
+	}
+	cc, _, err := m.mgr.GetRecord(ctx, ent.Uid, collection, rkey, cid.Undef)
 	if err != nil {
 		return "", "", err
 	}
-	return "at://" + did + "/" + collection + "/" + rkey, cc.String(), nil
+	return atURI, cc.String(), nil
 }
 
 // DeleteRecord removes a record from did's repo.
