@@ -134,3 +134,31 @@ func (c *Client) GetPosts(ctx context.Context, uris []string) ([]json.RawMessage
 	}
 	return resp.Posts, nil
 }
+
+// FeedPage is one page of app.bsky.feed.getAuthorFeed: feed items are passed
+// through as raw JSON (post view + optional reason/reply), the way GetPosts
+// hands back post views untouched.
+type FeedPage struct {
+	Items  []json.RawMessage
+	Cursor string
+}
+
+// GetAuthorFeed pages through an actor's posts (with replies and reposts, the
+// appview default). Pinned posts are not requested.
+func (c *Client) GetAuthorFeed(ctx context.Context, actor string, limit int, cursor string) (*FeedPage, error) {
+	if limit < 1 || limit > 100 {
+		limit = 30
+	}
+	params := url.Values{"actor": {actor}, "limit": {strconv.Itoa(limit)}}
+	if cursor != "" {
+		params.Set("cursor", cursor)
+	}
+	var resp struct {
+		Feed   []json.RawMessage `json:"feed"`
+		Cursor string            `json:"cursor"`
+	}
+	if err := c.get(ctx, "app.bsky.feed.getAuthorFeed", params, &resp); err != nil {
+		return nil, err
+	}
+	return &FeedPage{Items: resp.Feed, Cursor: resp.Cursor}, nil
+}

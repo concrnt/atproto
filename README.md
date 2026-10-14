@@ -213,6 +213,7 @@ volume で同じディレクトリに重ねる想定です(concrnt 本体・Acti
 | `GET /atproto/api/following` | フォロー中の Bluesky アカウント一覧 |
 | `GET /atproto/api/resolve-actor?target=` | handle/DID → プロフィールプレビュー |
 | `GET /atproto/api/resolve?uri=` | at-uri → appview の post view(atproto/record.json 表示用)。ブリッジが輸出した投稿なら `concrntURI`(元の cckv URI)を付加 |
+| `GET /atproto/api/author-feed?actor=&limit=&cursor=` | handle/DID の投稿一覧(appview の `getAuthorFeed`、リプライ・リポスト込み)。各 `feed[].post` は resolve と同じ post view(輸出済みなら `concrntURI` 付き)、リポストは `reason` 付き。`cursor` は appview のものをそのまま返すので次ページ取得にそのまま渡す |
 
 ## 開発
 

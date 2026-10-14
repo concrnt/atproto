@@ -112,6 +112,7 @@ func (s *Server) Register(e *echo.Echo) {
 	e.GET("/atproto/api/followers", s.handleFollowers)
 	e.GET("/atproto/api/resolve-actor", s.handleResolveActor)
 	e.GET("/atproto/api/resolve", s.handleResolveRecord)
+	e.GET("/atproto/api/author-feed", s.handleAuthorFeed)
 }
 
 // requester extracts the authenticated CCID propagated by the concrnt gateway.
@@ -146,6 +147,7 @@ func (s *Server) handleCCInfo(c echo.Context) error {
 			ServiceName + ".followers":    "/atproto/api/followers{?limit,cursor}",
 			ServiceName + ".resolveActor": "/atproto/api/resolve-actor{?target}",
 			ServiceName + ".resolve":      "/atproto/api/resolve{?uri}",
+			ServiceName + ".authorFeed":   "/atproto/api/author-feed{?actor,limit,cursor}",
 		},
 	})
 }
@@ -505,4 +507,102 @@ func (s *Server) exportedPostCcURI(atURI string) string {
 		return ""
 	}
 	return m.CcURI
+}
+
+// handleAuthorFeed proxies app.bsky.feed.getAuthorFeed for any actor so
+// clients can show a Bluesky user's past posts under their profile, the way
+// the AP person page walks a remote outbox. Each item carries the appview
+// post view (annotated with `concrntURI` when this bridge exported it, like
+// resolve) and the repost reason; the hydrated reply context is dropped since
+// clients resolve the parent themselves. The appview cursor is echoed back
+// untouched.
+func (s *Server) handleAuthorFeed(c echo.Context) error {
+	actor := strings.TrimSpace(c.QueryParam("actor"))
+	actor = strings.TrimPrefix(actor, "@")
+	if actor == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "missing actor"})
+	}
+
+	ctx := c.Request().Context()
+	var did string
+	if strings.HasPrefix(actor, "did:") {
+		did = actor
+	} else {
+		resolved, err := s.resolver.ResolveHandle(ctx, actor)
+		if err != nil {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": fmt.Sprintf("failed to resolve %s", actor)})
+		}
+		did = resolved
+	}
+
+	limit := 30
+	if l, err := strconv.Atoi(c.QueryParam("limit")); err == nil && l >= 1 && l <= 100 {
+		limit = l
+	}
+	cursor := c.QueryParam("cursor")
+
+	page, err := s.appview.GetAuthorFeed(ctx, did, limit, cursor)
+	if err != nil {
+		return c.JSON(http.StatusBadGateway, map[string]string{"error": "appview query failed"})
+	}
+
+	type feedItem struct {
+		post   map[string]json.RawMessage
+		reason json.RawMessage
+		uri    string
+	}
+	items := make([]feedItem, 0, len(page.Items))
+	uris := make([]string, 0, len(page.Items))
+	for _, raw := range page.Items {
+		var item struct {
+			Post   map[string]json.RawMessage `json:"post"`
+			Reason json.RawMessage            `json:"reason"`
+		}
+		if err := json.Unmarshal(raw, &item); err != nil || item.Post == nil {
+			continue
+		}
+		var uri string
+		if err := json.Unmarshal(item.Post["uri"], &uri); err != nil || uri == "" {
+			continue
+		}
+		items = append(items, feedItem{post: item.Post, reason: item.Reason, uri: uri})
+		uris = append(uris, uri)
+	}
+
+	exported := s.exportedPostCcURIs(uris)
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		if ccURI, ok := exported[item.uri]; ok {
+			if enc, err := json.Marshal(ccURI); err == nil {
+				item.post["concrntURI"] = enc
+			}
+		}
+		entry := map[string]any{"post": item.post}
+		if len(item.reason) > 0 {
+			entry["reason"] = item.reason
+		}
+		out = append(out, entry)
+	}
+	resp := map[string]any{"feed": out}
+	if page.Cursor != "" {
+		resp["cursor"] = page.Cursor
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// exportedPostCcURIs is the batch form of exportedPostCcURI: at-uri → concrnt
+// post URI for every uri this bridge exported, in one query.
+func (s *Server) exportedPostCcURIs(atURIs []string) map[string]string {
+	result := map[string]string{}
+	if len(atURIs) == 0 {
+		return result
+	}
+	var rows []store.URIMap
+	if err := s.db.Where("at_uri IN ? AND ref_type = ?", atURIs, "outbound-post").Find(&rows).Error; err != nil {
+		return result
+	}
+	for _, m := range rows {
+		result[m.AtURI] = m.CcURI
+	}
+	return result
 }
