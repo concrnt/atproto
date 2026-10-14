@@ -41,10 +41,9 @@ func TestDevnetCommitRoundtrip(t *testing.T) {
 	svc := core.NewService(ccid, url, privkey)
 
 	atURI := fmt.Sprintf("at://did:plc:e2etest/app.bsky.feed.post/3ktest%d", time.Now().Unix())
-	override := &world.ProfileOverride{Username: "E2E Tester", Link: "https://bsky.app/profile/e2e.test"}
 	distributes := []string{toconcrnt.InboxTimeline(ccid)}
 
-	doc := toconcrnt.BuildRecordDoc(ccid, "did:plc:e2etest", atURI, "bafyfake", override, distributes, time.Now().UTC())
+	doc := toconcrnt.BuildRecordDoc(ccid, atURI, "bafyfake", distributes, time.Now().UTC())
 	result, err := core.Commit(ctx, svc, doc)
 	if err != nil {
 		t.Fatalf("commit failed: %v", err)
@@ -58,11 +57,8 @@ func TestDevnetCommitRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve failed: %v", err)
 	}
-	if got.Schema != world.SchemaAtprotoRecord || got.Value.AtURI != atURI {
+	if got.Schema != world.SchemaAtprotoRecord || got.Value.AtURI != atURI || got.Value.CID != "bafyfake" {
 		t.Errorf("resolved wrong document: %+v", got)
-	}
-	if got.Value.ProfileOverride == nil || got.Value.ProfileOverride.Username != "E2E Tester" {
-		t.Errorf("profileOverride lost: %+v", got.Value)
 	}
 
 	del := toconcrnt.BuildDeleteDoc(ccid, key)

@@ -13,8 +13,12 @@ concrnt (v2) と Bluesky / atproto を双方向に接続するブリッジです
 - **Bluesky → concrnt**: Jetstream を購読し、フォロー中ユーザーの投稿・
   リポストと、ブリッジ済みアカウント宛のリプライ・引用・いいねを concrnt に
   取り込みます。投稿本文はコピーせず、軽量参照スキーマ
-  `atproto/record.json` (`{did, atUri, cid, profileOverride}`) として配送し、
-  表示時にクライアントが解決します(ap/note.json と同じ方式)。
+  `atproto/record.json` (`{atUri, cid}`) として配送し、表示時にクライアントが
+  ブリッジの `resolve` API で解決します(ap/note.json が `{actorURL, noteURL}` だけを
+  持つのと同じ方式)。作者 DID は at-uri の authority 部なので持たず、プロフィールの
+  スナップショット(profileOverride)も record には入れません。profileOverride を
+  付けるのは ActivityPub ブリッジと同じく、ネイティブスキーマの association
+  (`a/like` `a/reply` `a/reroute`)と `m/reroute` だけです。
   フォロー中ユーザーの投稿の配送先は各ユーザーの inbox タイムライン
   `cckv://<ccid>/atproto.concrnt.world/inbox`(アプリ側がユーザー署名で作成、
   サービスアカウントに allow-writers)で、**inbox 未作成のユーザーは配送先から
@@ -36,7 +40,7 @@ concrnt (v2) と Bluesky / atproto を双方向に接続するブリッジです
   | ブリッジ投稿の引用(`embed.record`) | `a/reroute.json`(`targetURI`=本体 record) | 元投稿 |
   | ブリッジ投稿のリポスト | `a/reroute.json`(`targetURI`=reroute record) | 元投稿 |
   | ブリッジ投稿へのいいね | `a/like.json` | 元投稿 |
-  | ブリッジアカウントのフォロー | `atproto/follow-notify.json` | `profiles/main` |
+  | ブリッジアカウントのフォロー | `atproto/follow-notify.json`(`{did}` のみ。表示はクライアントが `resolve-actor` で解決) | `profiles/main` |
 
   いずれもブリッジが export した投稿(`at_uri_map` の `outbound-post`)宛てのものだけを
   通知し、スレッドの root やブリッジ管理外の投稿宛ては通知しません。association の

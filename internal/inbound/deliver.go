@@ -63,7 +63,11 @@ func createdAt(ev *Event) time.Time {
 
 // profileOverride returns cached display info for a bsky actor, refreshing
 // from the appview when stale. Failures degrade to a bare handle-less
-// override rather than blocking ingestion.
+// override rather than blocking ingestion. It is only attached to the
+// native-schema associations and reroutes this bridge commits (a/like,
+// a/reply, a/reroute, m/reroute), exactly where the ActivityPub bridge puts
+// its profileOverride; the atproto/record.json body itself carries no
+// display data and is resolved by clients at render time.
 func (g *Ingester) profileOverride(ctx context.Context, did string) *world.ProfileOverride {
 	var actor store.Actor
 	err := g.db.Where("did = ?", did).First(&actor).Error
@@ -251,8 +255,7 @@ func (g *Ingester) IngestPost(ctx context.Context, ev *Event, isFollowed bool, t
 
 	// The body is committed even with no inbox to deliver to: the
 	// notification associations below point at it.
-	override := g.profileOverride(ctx, ev.DID)
-	doc := toconcrnt.BuildRecordDoc(g.core.CCID(), ev.DID, uri, ev.Commit.CID, override, dedupe(distributes), createdAt(ev))
+	doc := toconcrnt.BuildRecordDoc(g.core.CCID(), uri, ev.Commit.CID, dedupe(distributes), createdAt(ev))
 	if _, err := core.Commit(ctx, g.core, doc); err != nil {
 		slog.Error("failed to commit mirrored post", "atUri", uri, "error", err)
 		return
@@ -261,6 +264,10 @@ func (g *Ingester) IngestPost(ctx context.Context, ev *Event, isFollowed bool, t
 	g.index.addPost(uri)
 	slog.Info("mirrored post", "atUri", uri, "distributes", len(distributes))
 
+	if replyTarget == "" && quoteTarget == "" {
+		return
+	}
+	override := g.profileOverride(ctx, ev.DID)
 	if replyTarget != "" {
 		g.notifyInteraction(ctx, ev, "inbound-reply", world.SchemaReplyAssociation, targets.Parent, replyTarget, doc.Key, override)
 	}
@@ -285,8 +292,7 @@ func (g *Ingester) IngestFollow(ctx context.Context, ev *Event, subjectDID strin
 		return
 	}
 	notify := toconcrnt.NotifyTimeline(subjectCCID)
-	override := g.profileOverride(ctx, ev.DID)
-	doc := toconcrnt.BuildFollowNotifyAssociation(g.core.CCID(), ev.DID, toconcrnt.MainProfile(subjectCCID), override, []string{notify}, createdAt(ev))
+	doc := toconcrnt.BuildFollowNotifyAssociation(g.core.CCID(), ev.DID, toconcrnt.MainProfile(subjectCCID), []string{notify}, createdAt(ev))
 	result, err := core.Commit(ctx, g.core, doc)
 	if err != nil {
 		slog.Error("failed to commit follow notification", "follower", ev.DID, "subject", subjectDID, "error", err)
@@ -328,8 +334,7 @@ func (g *Ingester) IngestRepost(ctx context.Context, ev *Event, isFollowed, subj
 		exported = true
 	} else {
 		subjDID := didOfATURI(subjURI)
-		subjOverride := g.profileOverride(ctx, subjDID)
-		subjDoc := toconcrnt.BuildRecordDoc(g.core.CCID(), subjDID, subjURI, subjCID, subjOverride, nil, createdAt(ev))
+		subjDoc := toconcrnt.BuildRecordDoc(g.core.CCID(), subjURI, subjCID, nil, createdAt(ev))
 		if _, err := core.Commit(ctx, g.core, subjDoc); err != nil {
 			slog.Error("failed to mirror repost subject", "atUri", subjURI, "error", err)
 			return

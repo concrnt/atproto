@@ -75,8 +75,7 @@ func (g *Ingester) ImportPost(ctx context.Context, atURI string) (string, error)
 		}
 	}
 
-	override := g.profileOverride(ctx, did)
-	doc := toconcrnt.BuildRecordDoc(g.core.CCID(), did, atURI, view.CID, override, nil, createdAt)
+	doc := toconcrnt.BuildRecordDoc(g.core.CCID(), atURI, view.CID, nil, createdAt)
 	if err := core.Import(ctx, g.core, doc); err != nil {
 		return "", fmt.Errorf("failed to commit mirrored post: %w", err)
 	}

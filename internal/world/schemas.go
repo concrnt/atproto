@@ -69,12 +69,13 @@ type ProfileOverride struct {
 }
 
 // AtprotoRecord is the value of SchemaAtprotoRecord: a lightweight reference
-// to a Bluesky record, resolved by clients at render time (mirrors ap/note.json).
+// to a Bluesky record, resolved by clients at render time (mirrors
+// ap/note.json, which holds only the note and actor URLs). The author is
+// the authority of the at-uri, so it is not repeated; cid pins the version
+// (StrongRef) for outbound likes. No display data is snapshotted here.
 type AtprotoRecord struct {
-	DID             string           `json:"did"`
-	AtURI           string           `json:"atUri"`
-	CID             string           `json:"cid"`
-	ProfileOverride *ProfileOverride `json:"profileOverride,omitempty"`
+	AtURI string `json:"atUri"`
+	CID   string `json:"cid"`
 }
 
 // AtprotoFollow is the value of SchemaAtprotoFollow, committed by a user into
@@ -95,10 +96,10 @@ type AtprotoSettings struct {
 // AtprotoFollowNotify is the value of SchemaAtprotoFollowNotify: an
 // association on the bridged user's main profile, distributed to their
 // notify timeline when a Bluesky account follows them (the atproto analogue
-// of the native ack/follow.json notification).
+// of the native ack/follow.json notification). Only the follower's DID is
+// stored; clients resolve the profile through the bridge at render time.
 type AtprotoFollowNotify struct {
-	DID             string           `json:"did"`
-	ProfileOverride *ProfileOverride `json:"profileOverride,omitempty"`
+	DID string `json:"did"`
 }
 
 // TargetAssociationValue is the value of a/reply.json and a/reroute.json

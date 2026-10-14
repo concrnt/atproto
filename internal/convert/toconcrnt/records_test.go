@@ -2,6 +2,7 @@ package toconcrnt
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,15 +127,21 @@ func TestNotificationAssociationShapes(t *testing.T) {
 		t.Errorf("nil override must stay nil")
 	}
 
-	follow := BuildFollowNotifyAssociation("con1svc", "did:plc:follower", MainProfile("con1u"), override, notify, now)
+	follow := BuildFollowNotifyAssociation("con1svc", "did:plc:follower", MainProfile("con1u"), notify, now)
 	if follow.Kind != "association" || follow.Schema != world.SchemaAtprotoFollowNotify || follow.Key != "" {
 		t.Errorf("bad follow doc %+v", follow)
 	}
 	if follow.Associate == nil || *follow.Associate != "cckv://con1u/concrnt.world/profiles/main" {
 		t.Errorf("bad associate %+v", follow.Associate)
 	}
-	if follow.Value.DID != "did:plc:follower" || follow.Value.ProfileOverride != override {
+	if follow.Value.DID != "did:plc:follower" {
 		t.Errorf("bad value %+v", follow.Value)
+	}
+	// The follower is referenced by DID only; display data is resolved by
+	// clients, so the value must not carry a profile snapshot.
+	followRaw, _ := json.Marshal(follow)
+	if strings.Contains(string(followRaw), "profileOverride") {
+		t.Errorf("follow-notify must not snapshot a profile: %s", followRaw)
 	}
 	if follow.Author != "con1svc" || follow.Distributes == nil || len(*follow.Distributes) != 1 {
 		t.Errorf("bad author/distributes %+v", follow)
@@ -143,13 +150,29 @@ func TestNotificationAssociationShapes(t *testing.T) {
 
 func TestDocShapes(t *testing.T) {
 	now := time.Now()
-	doc := BuildRecordDoc("con1svc", "did:plc:a", "at://did:plc:a/app.bsky.feed.post/1", "bafy", nil,
+	doc := BuildRecordDoc("con1svc", "at://did:plc:a/app.bsky.feed.post/1", "bafy",
 		[]string{"cckv://con1u/atproto.concrnt.world/inbox"}, now)
 	if doc.Kind != "record" || doc.Schema != "https://schema.concrnt.world/atproto/record.json" {
 		t.Errorf("bad doc %+v", doc)
 	}
 	if doc.Distributes == nil || len(*doc.Distributes) != 1 {
 		t.Error("distributes missing")
+	}
+	// Like ap/note.json (actorURL + noteURL), the record is a bare reference:
+	// the at-uri (whose authority is the author DID) and the cid. Anything
+	// else, a profile snapshot in particular, belongs to render-time
+	// resolution through the bridge.
+	var raw map[string]any
+	b, _ := json.Marshal(doc)
+	_ = json.Unmarshal(b, &raw)
+	value := raw["value"].(map[string]any)
+	for k := range value {
+		if k != "atUri" && k != "cid" {
+			t.Errorf("record value carries field %q beyond atUri/cid: %s", k, b)
+		}
+	}
+	if value["atUri"] != "at://did:plc:a/app.bsky.feed.post/1" || value["cid"] != "bafy" {
+		t.Errorf("bad record value: %s", b)
 	}
 
 	del := BuildDeleteDoc("con1svc", "cckv://con1svc/atproto.concrnt.world/inbox/abc")

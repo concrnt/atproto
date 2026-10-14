@@ -102,11 +102,8 @@ func TestDevnetImportPost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve imported record failed: %v", err)
 	}
-	if doc.Value.AtURI != atURI || doc.Value.CID != "bafyimported" || doc.Value.DID != "did:plc:importe2e" {
+	if doc.Value.AtURI != atURI || doc.Value.CID != "bafyimported" {
 		t.Errorf("unexpected record value: %+v", doc.Value)
-	}
-	if doc.Value.ProfileOverride == nil || doc.Value.ProfileOverride.Username != "Import E2E" {
-		t.Errorf("profile override not applied: %+v", doc.Value.ProfileOverride)
 	}
 	if !doc.CreatedAt.Equal(createdAt) {
 		t.Errorf("createdAt = %s, want the post's %s (backdated past the window)", doc.CreatedAt, createdAt)

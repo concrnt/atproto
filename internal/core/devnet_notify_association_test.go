@@ -208,7 +208,7 @@ func TestDevnetNotifyAssociations(t *testing.T) {
 	//    do not follow the author) and never to the notify timeline, so it
 	//    stays anonymously readable: the inbox carries no reader policy.
 	replyAtURI := fmt.Sprintf("at://%s/app.bsky.feed.post/reply%d", actorDID, stamp)
-	body := toconcrnt.BuildRecordDoc(ccid, actorDID, replyAtURI, "bafyfake", override, []string{inbox}, createdAt)
+	body := toconcrnt.BuildRecordDoc(ccid, replyAtURI, "bafyfake", []string{inbox}, createdAt)
 	if _, err := core.Commit(ctx, svc, body); err != nil {
 		t.Fatalf("body commit failed: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestDevnetNotifyAssociations(t *testing.T) {
 	// restrict-readers and is not readable anonymously (the bug this shape
 	// avoids).
 	controlAtURI := fmt.Sprintf("at://%s/app.bsky.feed.post/control%d", actorDID, stamp)
-	control := toconcrnt.BuildRecordDoc(ccid, actorDID, controlAtURI, "bafyfake", override, []string{notify}, createdAt)
+	control := toconcrnt.BuildRecordDoc(ccid, controlAtURI, "bafyfake", []string{notify}, createdAt)
 	if _, err := core.Commit(ctx, svc, control); err != nil {
 		t.Fatalf("control commit failed: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestDevnetNotifyAssociations(t *testing.T) {
 	}
 
 	// 4. Follow notification as an association on the user's main profile.
-	follow := toconcrnt.BuildFollowNotifyAssociation(ccid, actorDID, profileKey, override, []string{notify}, createdAt)
+	follow := toconcrnt.BuildFollowNotifyAssociation(ccid, actorDID, profileKey, []string{notify}, createdAt)
 	followResult, err := core.Commit(ctx, svc, follow)
 	if err != nil {
 		t.Fatalf("follow notification commit failed: %v", err)

@@ -31,17 +31,16 @@ func NotifyTimeline(ccid string) string {
 }
 
 // BuildRecordDoc mirrors a bsky record as a lightweight reference
-// (atproto/record.json), distributed to the given timelines.
-func BuildRecordDoc(serviceCCID, did, atURI, cid string, override *world.ProfileOverride, distributes []string, createdAt time.Time) concrnt.Document[world.AtprotoRecord] {
+// (atproto/record.json: at-uri + cid only, like the AP bridge's ap/note.json),
+// distributed to the given timelines.
+func BuildRecordDoc(serviceCCID, atURI, cid string, distributes []string, createdAt time.Time) concrnt.Document[world.AtprotoRecord] {
 	doc := concrnt.Document[world.AtprotoRecord]{
 		Kind:   "record",
 		Key:    InboxKey(serviceCCID, atURI),
 		Schema: world.SchemaAtprotoRecord,
 		Value: world.AtprotoRecord{
-			DID:             did,
-			AtURI:           atURI,
-			CID:             cid,
-			ProfileOverride: override,
+			AtURI: atURI,
+			CID:   cid,
 		},
 		Author:    serviceCCID,
 		CreatedAt: createdAt,
@@ -116,13 +115,12 @@ func BuildRerouteAssociation(serviceCCID, targetCcURI, bodyKey string, override 
 // followed them: an atproto/follow-notify.json association on their main
 // profile (profileURI), distributed to their notify timeline. No follower
 // state is materialized anywhere; this document is the whole representation.
-func BuildFollowNotifyAssociation(serviceCCID, followerDID, profileURI string, override *world.ProfileOverride, distributes []string, createdAt time.Time) concrnt.Document[world.AtprotoFollowNotify] {
+func BuildFollowNotifyAssociation(serviceCCID, followerDID, profileURI string, distributes []string, createdAt time.Time) concrnt.Document[world.AtprotoFollowNotify] {
 	doc := concrnt.Document[world.AtprotoFollowNotify]{
 		Kind:   "association",
 		Schema: world.SchemaAtprotoFollowNotify,
 		Value: world.AtprotoFollowNotify{
-			DID:             followerDID,
-			ProfileOverride: override,
+			DID: followerDID,
 		},
 		Author:    serviceCCID,
 		CreatedAt: createdAt,
