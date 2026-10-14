@@ -405,8 +405,22 @@ func (d *Daemon) exportMessage(ctx context.Context, entity *store.Entity, cckv s
 		opts.Quote = quote
 	}
 
-	// Collect images: media schema attachments first, then inline markdown
-	// images, capped at 4.
+	// Collect media. bsky takes either one video or up to 4 images, never
+	// both, so a video attachment wins and the images are dropped (the video
+	// is the post's main content when present). Image sources are media
+	// schema attachments first, then inline markdown images.
+	for _, m := range value.Medias {
+		if !blobs.IsVideo(m.MediaType) {
+			continue
+		}
+		blob, err := d.blobs.Ingest(ctx, entity.DID, m.MediaURL)
+		if err != nil {
+			slog.Warn("failed to ingest video", "url", m.MediaURL, "error", err)
+			continue
+		}
+		opts.Video = blob
+		break
+	}
 	type imgSrc struct{ url, alt string }
 	var sources []imgSrc
 	for _, m := range value.Medias {
@@ -418,7 +432,7 @@ func (d *Daemon) exportMessage(ctx context.Context, entity *store.Entity, cckv s
 		sources = append(sources, imgSrc{url: img.URL, alt: img.Alt})
 	}
 	for _, src := range sources {
-		if len(opts.Images) >= 4 {
+		if opts.Video != nil || len(opts.Images) >= 4 {
 			break
 		}
 		blob, err := d.blobs.Ingest(ctx, entity.DID, src.url)
@@ -441,7 +455,7 @@ func (d *Daemon) exportMessage(ctx context.Context, entity *store.Entity, cckv s
 		}
 	}
 
-	if strings.TrimSpace(parts.Text) == "" && len(opts.Images) == 0 && opts.Quote == nil {
+	if strings.TrimSpace(parts.Text) == "" && len(opts.Images) == 0 && opts.Video == nil && opts.Quote == nil {
 		return
 	}
 

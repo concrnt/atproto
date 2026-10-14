@@ -1,12 +1,15 @@
 package pds
 
 import (
+	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 
 	"github.com/bluesky-social/indigo/carstore"
 	"github.com/ipfs/go-cid"
 	"github.com/labstack/echo/v4"
+	"gorm.io/gorm"
 
 	"github.com/concrnt/atproto/internal/store"
 )
@@ -140,8 +143,13 @@ func (s *Server) handleGetBlob(c echo.Context) error {
 	if _, err := cid.Parse(cidStr); err != nil {
 		return xrpcError(c, http.StatusBadRequest, "InvalidRequest", "malformed cid")
 	}
-	rec, r, err := s.blobs.Open(did, cidStr)
+	rec, r, err := s.blobs.Open(c.Request().Context(), did, cidStr)
 	if err != nil {
+		// A known blob that could not be read or restored from its source is
+		// an operational problem worth surfacing; an unknown cid is routine.
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			slog.Warn("blob unavailable", "did", did, "cid", cidStr, "error", err)
+		}
 		return xrpcError(c, http.StatusNotFound, "BlobNotFound", "no such blob")
 	}
 	defer r.Close()

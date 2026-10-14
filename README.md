@@ -54,7 +54,8 @@ concrnt (v2) と Bluesky / atproto を双方向に接続するブリッジです
 | concrnt | Bluesky |
 |---|---|
 | m/markdown, gfm, plaintext | `app.bsky.feed.post`(plaintext化 + link/tag facets) |
-| m/media.json | post + `embed.images`(≦4枚、事前取り込みblob) |
+| m/media.json(画像) | post + `embed.images`(≦4枚、事前取り込みblob) |
+| m/media.json(動画) | post + `embed.video`(mp4 1本・≦100MB、事前取り込みblob。動画があれば画像は落とす) |
 | m/reply.json | post + `reply{root, parent}` |
 | m/reroute.json(本文なし) | `app.bsky.feed.repost` |
 | m/reroute.json(本文あり) | post + `embed.record`(引用) |
@@ -134,6 +135,8 @@ value:  {"listenTimelines": ["cckv://..."], "enabled": true}
 - Postgres(ブリッジ専用DB)
 - concrnt core と**同一の** Redis(イベント購読)
 - 永続ボリューム(`dataDir`: carstore / blobs / firehoseイベントログ)
+  - blobs はキャッシュ扱い。ファイルを失っても取り込み元 URL(`at_blobs.src_url`)から
+    再取得して復元します(元コンテンツが不変である前提。ハッシュ不一致なら配信しません)
 - **専用ドメインは不要**。全経路(公開 PDS `/xrpc` 含む)を concrnt ゲートウェイ
   経由でプロキシします。PDS の serviceEndpoint は concrnt サーバーの FQDN
   そのものになるため、ワイルドカード DNS/TLS も要りません。

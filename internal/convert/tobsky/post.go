@@ -20,13 +20,16 @@ func (r StrongRef) lex() *comatproto.RepoStrongRef {
 }
 
 // PostOptions carries everything the caller resolved externally: ingested
-// image blobs, reply refs, the quoted record, and the fallback external link
-// used when the text was truncated.
+// image or video blobs, reply refs, the quoted record, and the fallback
+// external link used when the text was truncated.
 type PostOptions struct {
 	CreatedAt time.Time
 	Images    []*appbsky.EmbedImages_Image
-	Reply     *ReplyRefs
-	Quote     *StrongRef
+	// Video is the single ingested mp4 blob. bsky allows one video per post
+	// and never alongside images, so when set it takes precedence over Images.
+	Video *lexutil.LexBlob
+	Reply *ReplyRefs
+	Quote *StrongRef
 	// TruncatedLink renders an external card linking back to the full post on
 	// concrnt. Only used when parts.Truncated and no other embed competes.
 	TruncatedLink *ExternalLink
@@ -44,8 +47,9 @@ type ExternalLink struct {
 }
 
 // AssemblePost builds the final app.bsky.feed.post record. Embed precedence:
-// images > quote > truncation link (images and quotes are the post's own
-// content; the truncation link is only a courtesy pointer).
+// video > images > quote > truncation link (media and quotes are the post's
+// own content; the truncation link is only a courtesy pointer). A quote
+// combines with media via recordWithMedia.
 func AssemblePost(parts PostParts, opts PostOptions) *appbsky.FeedPost {
 	post := &appbsky.FeedPost{
 		LexiconTypeID: "app.bsky.feed.post",
@@ -62,6 +66,23 @@ func AssemblePost(parts PostParts, opts PostOptions) *appbsky.FeedPost {
 	}
 
 	switch {
+	case opts.Video != nil && opts.Quote != nil:
+		post.Embed = &appbsky.FeedPost_Embed{
+			EmbedRecordWithMedia: &appbsky.EmbedRecordWithMedia{
+				LexiconTypeID: "app.bsky.embed.recordWithMedia",
+				Record: &appbsky.EmbedRecord{
+					LexiconTypeID: "app.bsky.embed.record",
+					Record:        opts.Quote.lex(),
+				},
+				Media: &appbsky.EmbedRecordWithMedia_Media{
+					EmbedVideo: videoEmbed(opts.Video),
+				},
+			},
+		}
+	case opts.Video != nil:
+		post.Embed = &appbsky.FeedPost_Embed{
+			EmbedVideo: videoEmbed(opts.Video),
+		}
 	case len(opts.Images) > 0 && opts.Quote != nil:
 		post.Embed = &appbsky.FeedPost_Embed{
 			EmbedRecordWithMedia: &appbsky.EmbedRecordWithMedia{
@@ -106,6 +127,13 @@ func AssemblePost(parts PostParts, opts PostOptions) *appbsky.FeedPost {
 	}
 
 	return post
+}
+
+func videoEmbed(blob *lexutil.LexBlob) *appbsky.EmbedVideo {
+	return &appbsky.EmbedVideo{
+		LexiconTypeID: "app.bsky.embed.video",
+		Video:         blob,
+	}
 }
 
 // BuildLike builds an app.bsky.feed.like record.

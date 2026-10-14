@@ -6,8 +6,12 @@ package outbound_test
 // environment variables). Requires the devnet's Redis on localhost:6379.
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,7 +100,9 @@ func TestDevnetOutboundPath(t *testing.T) {
 		t.Fatalf("redis subscribe failed: %v", err)
 	}
 
-	daemon := outbound.NewDaemon(db, coreSvc, repos, blobs.NewService(db, t.TempDir()), "", time.Second)
+	blobDir := t.TempDir()
+	blobSvc := blobs.NewService(db, blobDir)
+	daemon := outbound.NewDaemon(db, coreSvc, repos, blobSvc, "", time.Second)
 	go daemon.Run(ctx, events)
 	time.Sleep(500 * time.Millisecond) // let the daemon load entities
 
@@ -140,6 +146,79 @@ func TestDevnetOutboundPath(t *testing.T) {
 	}
 	if !strings.Contains(string(rec), body) {
 		t.Errorf("record does not carry the post body: %s", rec)
+	}
+
+	// A post with a video attachment becomes an app.bsky.embed.video record
+	// whose blob is ingested from the media URL; losing the local blob file
+	// must be recoverable from that URL through the getBlob path.
+	video := bytes.Repeat([]byte{0x5a}, 300_000)
+	var mediaHits int
+	media := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mediaHits++
+		w.Header().Set("Content-Type", "video/mp4")
+		w.Write(video)
+	}))
+	defer media.Close()
+	videoKey := fmt.Sprintf("cckv://%s/e2etest/%d", ccid, time.Now().UnixNano())
+	videoDoc := concrnt.Document[world.MessageValue]{
+		Kind: "record", Key: videoKey, Schema: world.SchemaMarkdown,
+		Value: world.MessageValue{
+			Body:   "outbound e2e video post",
+			Medias: []world.Media{{MediaURL: media.URL + "/clip.mp4", MediaType: "video/mp4"}},
+		},
+		Author: ccid, CreatedAt: time.Now().UTC(), Distributes: &[]string{home},
+	}
+	if _, err := core.Commit(ctx, coreSvc, videoDoc); err != nil {
+		t.Fatalf("video post commit failed: %v", err)
+	}
+	var vm store.URIMap
+	deadline = time.Now().Add(15 * time.Second)
+	for {
+		if err := db.Where("cc_uri = ? AND ref_type = ?", videoKey, "outbound-post").First(&vm).Error; err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the daemon to export the video post")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	vrec, err := repos.GetRecordJSON(ctx, did, vm.Collection, vm.Rkey)
+	if err != nil {
+		t.Fatalf("video record not readable: %v", err)
+	}
+	if !strings.Contains(string(vrec), `"app.bsky.embed.video"`) || !strings.Contains(string(vrec), `"video/mp4"`) {
+		t.Errorf("video record lacks the video embed: %s", vrec)
+	}
+	var blobRow store.Blob
+	if err := db.Where("did = ? AND mime = ?", did, "video/mp4").First(&blobRow).Error; err != nil {
+		t.Fatalf("video blob row missing: %v", err)
+	}
+	if blobRow.Size != int64(len(video)) {
+		t.Errorf("blob size = %d, want %d", blobRow.Size, len(video))
+	}
+	if mediaHits != 1 {
+		t.Errorf("media origin hits after ingest = %d, want 1", mediaHits)
+	}
+	if err := os.Remove(filepath.Join(blobDir, "blobs", did, blobRow.CID)); err != nil {
+		t.Fatalf("could not remove blob file: %v", err)
+	}
+	_, r, err := blobSvc.Open(ctx, did, blobRow.CID)
+	if err != nil {
+		t.Fatalf("blob not restored from media URL after file loss: %v", err)
+	}
+	restored, _ := io.ReadAll(r)
+	r.Close()
+	if !bytes.Equal(restored, video) {
+		t.Error("restored blob content differs from the source")
+	}
+	if mediaHits != 2 {
+		t.Errorf("media origin hits after restore = %d, want 2", mediaHits)
+	}
+	if _, err := core.Commit(ctx, coreSvc, concrnt.Document[string]{
+		Kind: "delete", Schema: world.SchemaDelete, Value: videoKey,
+		Author: ccid, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Logf("video cleanup delete failed: %v", err)
 	}
 
 	// Cleanup on the devnet side.
