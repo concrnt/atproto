@@ -7,18 +7,21 @@ package core
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	concrnt "github.com/concrnt/concrnt"
 	"github.com/concrnt/concrnt/client"
 	"github.com/concrnt/concrnt/impl/interop"
+	"github.com/concrnt/concrnt/jwt"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -154,6 +157,80 @@ func (s *Service) CommitSigned(ctx context.Context, sd *concrnt.SignedDocument) 
 		return nil, fmt.Errorf("failed to parse commit response: %w", err)
 	}
 	return &result, nil
+}
+
+// Import signs doc with the service master key and submits it through the
+// server's repository import endpoint (POST /api/v2/repository) instead of
+// the commit endpoint. The import path commits in local-only mode, and an
+// authenticated requester committing its own documents there is exempt from
+// the backdate window, so a Bluesky post older than that window can still be
+// mirrored (the ActivityPub bridge imports remote notes the same way). The
+// endpoint never fans out to timelines, so docs with distributes do not
+// belong here.
+func Import[T any](ctx context.Context, s *Service, doc concrnt.Document[T]) error {
+	sd, err := Sign(doc, s.privateKey)
+	if err != nil {
+		return err
+	}
+	line, err := json.Marshal(sd)
+	if err != nil {
+		return err
+	}
+	token, err := s.masterToken()
+	if err != nil {
+		return err
+	}
+
+	url := s.baseURL() + "/api/v2/repository"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(append(line, '\n')))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "text/plain")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("import request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("import to %s failed: status %d: %s", url, resp.StatusCode, string(respBody))
+	}
+
+	// The endpoint answers 200 with one entry per rejected line; an empty
+	// list means every line was committed.
+	var results []struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(respBody, &results); err != nil {
+		return fmt.Errorf("failed to parse import response: %w", err)
+	}
+	if len(results) > 0 {
+		return fmt.Errorf("import rejected: %s", results[0].Error)
+	}
+	return nil
+}
+
+// masterToken issues a short-lived JWT signed by the service master key, the
+// raw-key login the auth middleware accepts (issuer = the bare CCID as a cckv
+// URI, audience = the server's FQDN).
+func (s *Service) masterToken() (string, error) {
+	now := time.Now()
+	var nonce [8]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", err
+	}
+	return jwt.Create(jwt.Claims{
+		Issuer:         "cckv://" + s.ccid,
+		Subject:        "concrnt",
+		Audience:       s.fqdn,
+		IssuedAt:       strconv.FormatInt(now.Unix(), 10),
+		ExpirationTime: strconv.FormatInt(now.Add(5*time.Minute).Unix(), 10),
+		JWTID:          hex.EncodeToString(nonce[:]),
+	}, s.privateKey)
 }
 
 // GetDocument resolves a cckv/ccfs URI into its parsed document.

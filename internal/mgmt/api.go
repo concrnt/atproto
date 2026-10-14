@@ -6,6 +6,7 @@ package mgmt
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/concrnt/atproto/internal/appview"
+	"github.com/concrnt/atproto/internal/inbound"
 	"github.com/concrnt/atproto/internal/relay"
 	"github.com/concrnt/atproto/internal/repoman"
 	"github.com/concrnt/atproto/internal/store"
@@ -72,6 +74,16 @@ type Server struct {
 	// OnProfileInit is called after an account goes active so the outbound
 	// layer can push the user's concrnt profile into their new bsky repo.
 	OnProfileInit func(ctx context.Context, ent *store.Entity)
+
+	// Importer mirrors a post on demand for /atproto/api/import (the inbound
+	// ingester in production). nil answers that endpoint with 501.
+	Importer PostImporter
+}
+
+// PostImporter materializes a Bluesky post as a concrnt record and returns
+// its cckv key. It reports inbound.ErrPostNotFound for unknown at-uris.
+type PostImporter interface {
+	ImportPost(ctx context.Context, atURI string) (string, error)
 }
 
 func NewServer(db *gorm.DB, repos *repoman.Manager, av *appview.Client, pdsHost string, relays []string, version string, serviceCcid string) *Server {
@@ -113,6 +125,7 @@ func (s *Server) Register(e *echo.Echo) {
 	e.GET("/atproto/api/resolve-actor", s.handleResolveActor)
 	e.GET("/atproto/api/resolve", s.handleResolveRecord)
 	e.GET("/atproto/api/author-feed", s.handleAuthorFeed)
+	e.POST("/atproto/api/import", s.handleImport)
 }
 
 // requester extracts the authenticated CCID propagated by the concrnt gateway.
@@ -148,6 +161,7 @@ func (s *Server) handleCCInfo(c echo.Context) error {
 			ServiceName + ".resolveActor": "/atproto/api/resolve-actor{?target}",
 			ServiceName + ".resolve":      "/atproto/api/resolve{?uri}",
 			ServiceName + ".authorFeed":   "/atproto/api/author-feed{?actor,limit,cursor}",
+			ServiceName + ".import":       "/atproto/api/import",
 		},
 	})
 }
@@ -497,6 +511,42 @@ func (s *Server) handleResolveRecord(c echo.Context) error {
 		}
 	}
 	return c.JSONBlob(http.StatusOK, view)
+}
+
+// handleImport mirrors a Bluesky post into concrnt on demand (POST {uri})
+// and answers {key} with the record's cckv URI, the ActivityPub bridge's
+// import endpoint for notes. Any authenticated user may ask; the record is
+// signed by the service account and distributed to no timeline, so the
+// request only makes the post addressable for the native detail view.
+func (s *Server) handleImport(c echo.Context) error {
+	if requester(c) == "" {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "authentication required"})
+	}
+	var body struct {
+		URI string `json:"uri"`
+	}
+	if err := c.Bind(&body); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+	}
+	uri := strings.TrimSpace(body.URI)
+	parsed, err := syntax.ParseATURI(uri)
+	if err != nil || parsed.Collection() != "app.bsky.feed.post" || parsed.RecordKey() == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "uri must be an at:// uri of an app.bsky.feed.post record"})
+	}
+	if s.Importer == nil {
+		return c.JSON(http.StatusNotImplemented, map[string]string{"error": "import is not available"})
+	}
+
+	key, err := s.Importer.ImportPost(c.Request().Context(), uri)
+	if err != nil {
+		if errors.Is(err, inbound.ErrPostNotFound) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "post not found"})
+		}
+		slog.Warn("import failed", "atUri", uri, "requester", requester(c), "error", err)
+		return c.JSON(http.StatusBadGateway, map[string]string{"error": fmt.Sprintf("failed to import post: %v", err)})
+	}
+	slog.Info("imported post", "atUri", uri, "key", key, "requester", requester(c))
+	return c.JSON(http.StatusOK, map[string]string{"key": key})
 }
 
 // exportedPostCcURI resolves the at-uri of a post this bridge exported to

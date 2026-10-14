@@ -217,6 +217,7 @@ volume で同じディレクトリに重ねる想定です(concrnt 本体・Acti
 | `GET /atproto/api/resolve-actor?target=` | handle/DID → プロフィールプレビュー |
 | `GET /atproto/api/resolve?uri=` | at-uri → appview の post view(atproto/record.json 表示用)。ブリッジが輸出した投稿なら `concrntURI`(元の cckv URI)を付加 |
 | `GET /atproto/api/author-feed?actor=&limit=&cursor=` | handle/DID の投稿一覧(appview の `getAuthorFeed`、リプライ・リポスト込み)。各 `feed[].post` は resolve と同じ post view(輸出済みなら `concrntURI` 付き)、リポストは `reason` 付き。`cursor` は appview のものをそのまま返すので次ページ取得にそのまま渡す |
+| `POST /atproto/api/import {uri}` | at-uri の投稿をオンデマンドで concrnt レコード(`atproto/record.json`)として実体化し `{key}` を返す(要認証。ActivityPub ブリッジの `/ap/api/import` と同じ位置づけ)。配送先の無い投稿(ブリッジ済みユーザーの誰もフォローしていない作者の投稿)をクライアントの詳細ビューで開いたとき、リプライ・リアクションをぶら下げる先の record を作るために使う。キーは通常の inbox キー(`atproto.concrnt.world/inbox/<hash(at-uri)>`)で、どのタイムラインにも配送しない。既にミラー済みならそのキーを返すだけ(配送済み record を distributes 無しで上書きしない)。本体の backdate 窓(7日)より古い投稿も取り込めるよう、commit ではなく repository import(`POST /api/v2/repository`、サービス master 鍵の JWT)で書き込む。取り込んだ投稿は `at_remote_posts` と削除用インデックスにも載るので、以後のリプライの root 解決と firehose 上の削除追従は配送経由の投稿と同じ |
 
 ## 開発
 
