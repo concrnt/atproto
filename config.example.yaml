@@ -31,9 +31,16 @@ atproto:
   jetstream: jetstream2.us-east.bsky.network
   appview:
     url: https://public.api.bsky.app
+  # Services that authenticated XRPC calls from atproto clients (the official
+  # Bluesky app logged in with an app password) are forwarded to. Endpoints
+  # come from the DID documents.
+  # proxy:
+  #   appviewDid: did:web:api.bsky.app
+  #   chatDid: did:web:api.bsky.chat
   dataDir: /data                     # carstore shards, blobs, firehose event log
   masterRotationKey: <K256 private key, multibase or hex; PLC rotation key for ALL bridged DIDs — keep safe>
   keyEncryptionKey: <32-byte hex; encrypts per-account signing keys at rest>
+  # sessionSecret: <optional; signs app-password session JWTs. Derived from keyEncryptionKey when empty>
   # firehoseRetentionHours: 72
   # actorCacheTtlMinutes: 60
   # entityReloadIntervalSeconds: 60

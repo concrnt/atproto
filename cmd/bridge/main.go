@@ -1,11 +1,15 @@
-// Command bridge runs the concrnt⇔Bluesky bridge: a masqueraded read-only
-// PDS (public listener), a management API behind the concrnt gateway, an
-// outbound daemon exporting concrnt activity, and an inbound Jetstream
-// consumer mirroring Bluesky activity.
+// Command bridge runs the concrnt⇔Bluesky bridge: a masqueraded PDS whose
+// repos are written only from concrnt activity (atproto clients may log in
+// with an app password to read, and to use DMs through the service proxy),
+// a management API behind the concrnt gateway, an outbound daemon exporting
+// concrnt activity, and an inbound Jetstream consumer mirroring Bluesky
+// activity.
 package main
 
 import (
 	"context"
+	"crypto/hkdf"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -16,6 +20,7 @@ import (
 	"time"
 
 	"github.com/bluesky-social/indigo/atproto/atcrypto"
+	"github.com/bluesky-social/indigo/atproto/identity"
 	"github.com/labstack/echo/v4"
 	echomiddleware "github.com/labstack/echo/v4/middleware"
 	"gorm.io/driver/postgres"
@@ -56,6 +61,23 @@ func parseRotationKey(s string) (atcrypto.PrivateKey, error) {
 	return atcrypto.ParsePrivateBytesK256(raw)
 }
 
+// sessionSecret is the HMAC key for client session JWTs: the configured
+// value, or one derived from the key-encryption key so that no extra secret
+// has to be provisioned.
+func sessionSecret(configured, keyEncryptionKeyHex string) ([]byte, error) {
+	if configured != "" {
+		if len(configured) < 32 {
+			return nil, fmt.Errorf("atproto.sessionSecret must be at least 32 characters")
+		}
+		return []byte(configured), nil
+	}
+	kek, err := hex.DecodeString(keyEncryptionKeyHex)
+	if err != nil {
+		return nil, fmt.Errorf("keyEncryptionKey must be hex")
+	}
+	return hkdf.Key(sha256.New, kek, nil, "concrnt-atproto-bridge/session-jwt/v1", 32)
+}
+
 // newEcho builds the HTTP router with the app-wide middleware. CORS is set
 // here rather than by the gateway's injectCors so that both faces behave the
 // same as the ActivityPub bridge: the management API is called cross-origin
@@ -68,7 +90,10 @@ func newEcho() *echo.Echo {
 	e.Use(echomiddleware.CORSWithConfig(echomiddleware.CORSConfig{
 		AllowOrigins: []string{"*"},
 		AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
-		AllowHeaders: []string{echo.HeaderContentType, echo.HeaderAuthorization},
+		AllowHeaders: []string{echo.HeaderContentType, echo.HeaderAuthorization,
+			"atproto-proxy", "atproto-accept-labelers"},
+		ExposeHeaders: []string{"atproto-content-labelers", "atproto-repo-rev", "Retry-After"},
+		MaxAge:        86400,
 	}))
 	return e
 }
@@ -151,6 +176,21 @@ func run() error {
 	e := newEcho()
 
 	pdsSrv := pds.NewServer(db, repos, blobSvc, pdsHost, version)
+	secret, err := sessionSecret(cfg.Atproto.SessionSecret, cfg.Atproto.KeyEncryptionKey)
+	if err != nil {
+		return err
+	}
+	// Service DIDs (appview, chat, labelers) resolve through PLC / did:web;
+	// handles are irrelevant for that, and a 10 min cache keeps the hot path
+	// off the network.
+	dir := identity.NewCacheDirectory(&identity.BaseDirectory{
+		PLCURL:                 cfg.Atproto.PLCDirectory,
+		SkipHandleVerification: true,
+		UserAgent:              "concrnt-atproto-bridge/" + version,
+	}, 1000, 10*time.Minute, time.Minute, time.Minute)
+	pdsSrv.Keys = ks
+	pdsSrv.Sessions = pds.NewSessions(db, secret, pdsHost)
+	pdsSrv.Proxy = pds.NewProxy(dir, cfg.Atproto.Proxy.AppviewDID, cfg.Atproto.Proxy.ChatDID, ks, version)
 	pdsSrv.OnFreshConsumer = func(ctx context.Context) {
 		n, err := repos.AnnounceActiveAccounts(ctx)
 		if err != nil {

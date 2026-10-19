@@ -41,6 +41,26 @@ func TestLoadSingleFile(t *testing.T) {
 	if c.Atproto.PLCDirectory != "https://plc.directory" {
 		t.Fatalf("default not applied: %+v", c.Atproto)
 	}
+	if c.Atproto.Proxy.AppviewDID != "did:web:api.bsky.app" || c.Atproto.Proxy.ChatDID != "did:web:api.bsky.chat" {
+		t.Fatalf("proxy defaults not applied: %+v", c.Atproto.Proxy)
+	}
+}
+
+func TestProxyAndSessionSecretOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	writeFile(t, path, baseYAML+`
+  sessionSecret: s3cret
+  proxy:
+    chatDid: did:web:chat.example
+`)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Atproto.SessionSecret != "s3cret" || c.Atproto.Proxy.ChatDID != "did:web:chat.example" || c.Atproto.Proxy.AppviewDID != "did:web:api.bsky.app" {
+		t.Fatalf("override: %+v", c.Atproto)
+	}
 }
 
 func TestLoadDirectoryMergesLaterFilesOverEarlier(t *testing.T) {

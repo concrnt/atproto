@@ -121,6 +121,44 @@ type Cursor struct {
 
 func (Cursor) TableName() string { return "at_cursors" }
 
+// AppPassword is a login credential for atproto clients (the official
+// Bluesky app) issued by the bridge on the user's request. The plaintext is
+// bridge-generated with ~80 bits of entropy and shown once, so a plain
+// SHA-256 digest is stored and login is a single indexed lookup.
+type AppPassword struct {
+	ID         string `gorm:"primaryKey"`
+	DID        string `gorm:"column:did;uniqueIndex:idx_app_pw_did_name;not null"`
+	Name       string `gorm:"uniqueIndex:idx_app_pw_did_name;not null"`
+	Hash       string `gorm:"uniqueIndex;not null"` // hex sha256 of the plaintext
+	CreatedAt  time.Time
+	LastUsedAt *time.Time
+}
+
+func (AppPassword) TableName() string { return "at_app_passwords" }
+
+// Session is one refresh-token lineage of an atproto client login. The
+// access token carries the same JTI, so deleting the row revokes both.
+type Session struct {
+	JTI           string `gorm:"primaryKey"`
+	DID           string `gorm:"column:did;index"`
+	AppPasswordID string `gorm:"index"`
+	ExpiresAt     time.Time
+	CreatedAt     time.Time
+}
+
+func (Session) TableName() string { return "at_sessions" }
+
+// Preferences holds the app.bsky.actor preferences blob the official app
+// stores on its PDS (saved feeds, muted words, content labels...). It is
+// private client state, not repo data.
+type Preferences struct {
+	DID       string         `gorm:"column:did;primaryKey"`
+	Prefs     datatypes.JSON `gorm:"type:jsonb"`
+	UpdatedAt time.Time
+}
+
+func (Preferences) TableName() string { return "at_preferences" }
+
 func AutoMigrate(db *gorm.DB) error {
 	return db.AutoMigrate(
 		&Entity{},
@@ -131,5 +169,8 @@ func AutoMigrate(db *gorm.DB) error {
 		&Actor{},
 		&Blob{},
 		&Cursor{},
+		&AppPassword{},
+		&Session{},
+		&Preferences{},
 	)
 }

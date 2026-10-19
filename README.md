@@ -6,7 +6,9 @@ concrnt (v2) と Bluesky / atproto を双方向に接続するブリッジです
 
 ## 仕組み
 
-- **concrnt → Bluesky**: ブリッジが「読み取り専用PDS」として振る舞います。
+- **concrnt → Bluesky**: ブリッジが「読み取り専用PDS」として振る舞います(公式 Bluesky アプリは
+  アプリパスワードでここにログインして DM を使えますが、repo への書き込みはできません。
+  後述「公式 Bluesky アプリでログイン」参照)。
   ブリッジ有効化した concrnt アカウントごとに did:plc と atproto repo (MST) を
   管理し、`com.atproto.sync.*` XRPC と `subscribeRepos` firehose を提供して
   relay (bsky.network) にクロールさせ、appview に投稿を取り込ませます。
@@ -216,12 +218,80 @@ volume で同じディレクトリに重ねる想定です(concrnt 本体・Acti
 | `POST /atproto/api/setup {handle}` | 登録1段階目: 持ち込みドメインで did:plc 発番、status=pending。検証手順を返す |
 | `POST /atproto/api/verify` | 登録2段階目: handle の DNS/well-known 検証成功で active 化(relay へ requestCrawl → repo 初期化) |
 | `POST /atproto/api/announce` | 自分の `#identity`/`#account` を firehose に再送し、requestCrawl と concrnt プロフィールの repo への同期(新しい #commit)もやり直す。appview が `handle.invalid` を表示している(DNS 反映前に検証された)時、relay が activation を取りこぼした時、プロフィールが Bluesky 側に反映されない時に使う |
-| `GET /atproto/api/info` | ブリッジ情報 + 自分のエンティティ状態 |
+| `GET /atproto/api/info` | ブリッジ情報 + 自分のエンティティ状態 + `login:{service,identifier}`(公式アプリのログイン画面に入れる値) |
 | `GET /atproto/api/following` | フォロー中の Bluesky アカウント一覧 |
 | `GET /atproto/api/resolve-actor?target=` | handle/DID → プロフィールプレビュー |
 | `GET /atproto/api/resolve?uri=` | at-uri → appview の post view(atproto/record.json 表示用)。ブリッジが輸出した投稿なら `concrntURI`(元の cckv URI)を付加 |
 | `GET /atproto/api/author-feed?actor=&limit=&cursor=` | handle/DID の投稿一覧(appview の `getAuthorFeed`、リプライ・リポスト込み)。各 `feed[].post` は resolve と同じ post view(輸出済みなら `concrntURI` 付き)、リポストは `reason` 付き。`cursor` は appview のものをそのまま返すので次ページ取得にそのまま渡す |
 | `POST /atproto/api/import {uri}` | at-uri の投稿をオンデマンドで concrnt レコード(`atproto/record.json`)として実体化し `{key}` を返す(要認証。ActivityPub ブリッジの `/ap/api/import` と同じ位置づけ)。配送先の無い投稿(ブリッジ済みユーザーの誰もフォローしていない作者の投稿)をクライアントの詳細ビューで開いたとき、リプライ・リアクションをぶら下げる先の record を作るために使う。キーは通常の inbox キー(`atproto.concrnt.world/inbox/<hash(at-uri)>`)で、どのタイムラインにも配送しない。既にミラー済みならそのキーを返すだけ(配送済み record を distributes 無しで上書きしない)。本体の backdate 窓(7日)より古い投稿も取り込めるよう、commit ではなく repository import(`POST /api/v2/repository`、サービス master 鍵の JWT)で書き込む。取り込んだ投稿は `at_remote_posts` と削除用インデックスにも載るので、以後のリプライの root 解決と firehose 上の削除追従は配送経由の投稿と同じ |
+| `GET /atproto/api/app-passwords` | 公式 Bluesky アプリ用アプリパスワードの一覧(`{appPasswords:[{id,name,createdAt,lastUsedAt}]}`。秘密は含まない) |
+| `POST /atproto/api/app-passwords {name}` | アプリパスワード発行。`password`(平文、この応答限り)と `login:{service,identifier}` を返す。同名は 409、上限 20 個 |
+| `DELETE /atproto/api/app-passwords/{id}` | 失効(id か name)。そのパスワードで開いたセッションも全部消える |
+
+## 公式 Bluesky アプリでログイン(DM 用)
+
+DM(`chat.bsky.*`)は Bluesky 公式アプリからしか扱えないため、ブリッジは公式アプリ
+(bsky.app / iOS / Android)が **ユーザーの PDS としてログインできる**最小限の面を
+持ちます。repo は引き続き concrnt からしか書き込まれません(read-only)。
+
+1. world-app の 設定 > 外部連携 > Bluesky で **アプリパスワード**を発行する
+   (`POST /atproto/api/app-passwords {name}`。平文はこの応答にしか含まれない)。
+2. 公式アプリのログイン画面で「ホスティングプロバイダ」に **concrnt サーバーの URL**
+   (`https://<pdsHost>`、`/atproto/api/info` の `login.service`)、ユーザー名にハンドル、
+   パスワードにアプリパスワードを入れる。
+
+できること / できないこと:
+
+| 公式アプリの操作 | 結果 |
+|---|---|
+| タイムライン・通知・プロフィール閲覧、ミュート、プッシュ登録など `app.bsky.*` | appview へプロキシ(サービス認証 JWT 付き) |
+| DM の閲覧・送信(`chat.bsky.*`) | chat サービスへプロキシ |
+| DM 受信範囲の設定(`chat.bsky.actor.declaration`) | 唯一許可される repo 書き込み(firehose に流れ、appview/chat に伝わる) |
+| アプリ環境設定(`app.bsky.actor.getPreferences/putPreferences`) | ブリッジ DB(`at_preferences`)に保存。repo 外 |
+| 投稿・いいね・リポスト・フォロー・プロフィール編集・画像アップロード(DM の画像添付含む)・アカウント設定変更 | `403 ReadOnlyBridge`(アプリにはメッセージがトースト表示される) |
+
+仕組み:
+
+- `com.atproto.server.createSession / refreshSession / getSession / deleteSession`:
+  HS256 の access(2 時間)/ refresh(90 日)JWT。署名鍵は `atproto.sessionSecret`、
+  未設定なら `keyEncryptionKey` から HKDF で導出。refresh 系列は `at_sessions` に控え、
+  アプリパスワードの失効(`DELETE /atproto/api/app-passwords/{id}`)でそのセッションも全部消える。
+  access 期限切れは `400 ExpiredToken`(公式アプリはこれでだけ refresh する。401 はログアウト扱い)。
+- 認証済みで `atproto-proxy: <did>#<service>` ヘッダ付き、またはヘッダ無しの `app.bsky.*` /
+  `chat.bsky.*` は、その DID ドキュメントの service endpoint へ転送する
+  (既定 `atproto.proxy.appviewDid` = `did:web:api.bsky.app`、`chatDid` = `did:web:api.bsky.chat`)。
+  Authorization にはユーザーの repo 署名鍵で署名したサービス認証 JWT(`iss`=ユーザー DID、
+  `aud`=サービス DID、`lxm`=メソッド、60 秒)を付ける。`atproto-accept-labelers` は転送し、
+  `atproto-content-labelers` / `atproto-repo-rev` / `Retry-After` を返す。body は 1 MiB まで。
+  未認証の呼び出しは従来通り `501 MethodNotImplemented`。
+- `com.atproto.repo.getRecord / listRecords / describeRepo`(公開)、
+  `com.atproto.server.getServiceAuth`、`com.atproto.identity.resolveHandle`(ブリッジ済みハンドルは
+  ローカル、それ以外は appview へ)、`listAppPasswords`(閲覧のみ)。
+- CORS は `atproto-proxy` / `atproto-accept-labelers` を許可し、上記応答ヘッダを expose する
+  (bsky.app の Web 版はプリフライトで落ちるため)。
+
+既知の制約:
+
+- appview がその DID を知らない(relay 未クロール)とログイン直後の自分のプロフィールが取れない。
+  `POST /atproto/api/announce` で再送する。
+- サービス認証 JWT は 60 秒窓なので、ブリッジのサーバー時計を同期しておく。
+- 2 要素認証・OAuth・パスワード変更は無い。資格情報はアプリパスワードだけ。
+
+curl での確認(`H=https://<pdsHost>`):
+
+```sh
+curl -s $H/xrpc/com.atproto.server.createSession -H 'content-type: application/json' \
+  -d '{"identifier":"alice.example.com","password":"xxxx-xxxx-xxxx-xxxx"}'   # → accessJwt/refreshJwt/didDoc
+A="authorization: Bearer <accessJwt>"
+curl -s $H/xrpc/com.atproto.server.getSession -H "$A"
+curl -s $H/xrpc/app.bsky.actor.getPreferences -H "$A"
+curl -s "$H/xrpc/app.bsky.actor.getProfile?actor=<did>" -H "$A" -H 'atproto-proxy: did:web:api.bsky.app#bsky_appview'
+curl -s $H/xrpc/chat.bsky.convo.listConvos -H "$A" -H 'atproto-proxy: did:web:api.bsky.chat#bsky_chat'
+curl -s $H/xrpc/com.atproto.repo.putRecord -H "$A" -H 'content-type: application/json' \
+  -d '{"repo":"<did>","collection":"chat.bsky.actor.declaration","rkey":"self","record":{"allowIncoming":"all"}}'
+curl -s $H/xrpc/com.atproto.repo.createRecord -H "$A" -H 'content-type: application/json' \
+  -d '{"repo":"<did>","collection":"app.bsky.feed.post","record":{"text":"x"}}'   # → 403 ReadOnlyBridge
+```
 
 ## 開発
 

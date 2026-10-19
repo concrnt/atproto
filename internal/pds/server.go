@@ -1,6 +1,9 @@
 // Package pds implements the public face of the masqueraded PDS: the sync
-// XRPC endpoints and the subscribeRepos firehose. Everything here is
-// unauthenticated public data; the management API lives in package mgmt.
+// XRPC endpoints and the subscribeRepos firehose (public data), plus what an
+// atproto client needs to log in here as its PDS with an app password:
+// sessions, a service proxy to the appview / chat service, preferences and
+// repo reads. Repo writes are refused except the DM inbound policy record;
+// the management API lives in package mgmt.
 // Handle resolution is not served here: handles are user-owned domains, so
 // the DNS TXT record (or a well-known file on the user's own web server) is
 // the user's responsibility.
@@ -10,11 +13,13 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/labstack/echo/v4"
 	"gorm.io/gorm"
 
 	"github.com/concrnt/atproto/internal/blobs"
+	"github.com/concrnt/atproto/internal/keys"
 	"github.com/concrnt/atproto/internal/repoman"
 	"github.com/concrnt/atproto/internal/store"
 )
@@ -25,6 +30,12 @@ type Server struct {
 	blobs   *blobs.Service
 	pdsHost string // concrnt FQDN; the atproto serviceEndpoint origin
 	version string
+
+	// Sessions, Proxy and Keys enable the client-facing (authenticated)
+	// surface. Left nil, those methods answer 501 as before.
+	Sessions *Sessions
+	Proxy    *Proxy
+	Keys     *keys.Service
 
 	// OnFreshConsumer is called when a firehose consumer subscribes without
 	// a cursor (a relay's first connection to this host). The bridge uses it
@@ -51,10 +62,71 @@ func (s *Server) Register(e *echo.Echo) {
 	e.GET("/xrpc/com.atproto.sync.listBlobs", s.handleListBlobs)
 	e.GET("/xrpc/com.atproto.server.describeServer", s.handleDescribeServer)
 
-	// Any other XRPC method: standard "not implemented" error, so crawlers
-	// treat this as a read-only host rather than a broken one.
-	e.GET("/xrpc/*", s.handleNotImplemented)
-	e.POST("/xrpc/*", s.handleNotImplemented)
+	// Client sessions (app-password login from the official Bluesky app).
+	e.POST("/xrpc/com.atproto.server.createSession", s.handleCreateSession)
+	e.POST("/xrpc/com.atproto.server.refreshSession", s.handleRefreshSession)
+	e.GET("/xrpc/com.atproto.server.getSession", s.handleGetSession)
+	e.POST("/xrpc/com.atproto.server.deleteSession", s.handleDeleteSession)
+	e.GET("/xrpc/com.atproto.server.getServiceAuth", s.handleGetServiceAuth)
+	e.GET("/xrpc/com.atproto.server.listAppPasswords", s.handleListAppPasswords)
+	e.GET("/xrpc/com.atproto.identity.resolveHandle", s.handleResolveHandle)
+
+	// Repo reads (public) and the single whitelisted write.
+	e.GET("/xrpc/com.atproto.repo.getRecord", s.handleRepoGetRecord)
+	e.GET("/xrpc/com.atproto.repo.listRecords", s.handleRepoListRecords)
+	e.GET("/xrpc/com.atproto.repo.describeRepo", s.handleRepoDescribeRepo)
+	e.POST("/xrpc/com.atproto.repo.createRecord", s.handleRepoPutRecord)
+	e.POST("/xrpc/com.atproto.repo.putRecord", s.handleRepoPutRecord)
+	e.POST("/xrpc/com.atproto.repo.deleteRecord", s.handleRepoDeleteRecord)
+	e.POST("/xrpc/com.atproto.repo.applyWrites", s.handleRepoApplyWrites)
+
+	// Private client preferences, stored here (not in the repo).
+	e.GET("/xrpc/app.bsky.actor.getPreferences", s.handleGetPreferences)
+	e.POST("/xrpc/app.bsky.actor.putPreferences", s.handlePutPreferences)
+
+	// Any other XRPC method: proxied to the appview / chat service for an
+	// authenticated client, otherwise the standard "not implemented" error
+	// so crawlers treat this as a read-only host rather than a broken one.
+	e.GET("/xrpc/*", s.handleCatchAll)
+	e.POST("/xrpc/*", s.handleCatchAll)
+}
+
+// handleCatchAll decides what happens to XRPC methods without a local route.
+func (s *Server) handleCatchAll(c echo.Context) error {
+	nsid := strings.TrimPrefix(c.Request().URL.Path, "/xrpc/")
+	if readOnlyMethods[nsid] {
+		return s.handleReadOnly(c)
+	}
+	target := c.Request().Header.Get(proxyHeaderName)
+	if s.Proxy == nil || s.Sessions == nil || (target == "" && s.Proxy.defaultTarget(nsid) == "") {
+		return s.handleNotImplemented(c)
+	}
+	did := s.Sessions.Authenticate(c)
+	if did == "" {
+		return nil
+	}
+	return s.Proxy.Forward(c, did, nsid, target)
+}
+
+// handleResolveHandle answers for bridged handles locally and otherwise
+// forwards to the appview (which resolves the whole network).
+func (s *Server) handleResolveHandle(c echo.Context) error {
+	handle := normalizeIdentifier(c.QueryParam("handle"))
+	if handle == "" {
+		return xrpcError(c, http.StatusBadRequest, "InvalidRequest", "missing handle")
+	}
+	var ent store.Entity
+	if err := s.db.Where("handle = ? AND status = ?", handle, "active").First(&ent).Error; err == nil {
+		return c.JSON(http.StatusOK, map[string]string{"did": ent.DID})
+	}
+	if s.Proxy == nil || s.Sessions == nil || bearer(c) == "" {
+		return xrpcError(c, http.StatusBadRequest, "HandleNotFound", "handle not hosted here")
+	}
+	did := s.Sessions.Authenticate(c)
+	if did == "" {
+		return nil
+	}
+	return s.Proxy.Forward(c, did, "com.atproto.identity.resolveHandle", s.Proxy.appviewDID+"#bsky_appview")
 }
 
 func xrpcError(c echo.Context, status int, name, msg string) error {
@@ -67,7 +139,7 @@ func (s *Server) handleHealth(c echo.Context) error {
 
 func (s *Server) handleNotImplemented(c echo.Context) error {
 	return xrpcError(c, http.StatusNotImplemented, "MethodNotImplemented",
-		"this host is a read-only bridge PDS; write and session XRPC methods are not available")
+		"this host is a read-only bridge PDS; this XRPC method is not available")
 }
 
 func (s *Server) handleDescribeServer(c echo.Context) error {

@@ -40,18 +40,32 @@ type Appview struct {
 	URL string `yaml:"url"`
 }
 
+// Proxy names the services that authenticated XRPC calls from atproto
+// clients (the official Bluesky app) are forwarded to when the request
+// carries no `atproto-proxy` header. Endpoints are resolved from the DID
+// documents, so only the DIDs are configured.
+type Proxy struct {
+	AppviewDID string `yaml:"appviewDid"`
+	ChatDID    string `yaml:"chatDid"`
+}
+
 type Atproto struct {
-	PLCDirectory             string   `yaml:"plcDirectory"`
-	Relays                   []string `yaml:"relays"`
-	Jetstream                string   `yaml:"jetstream"`
-	Appview                  Appview  `yaml:"appview"`
-	DataDir                  string   `yaml:"dataDir"`
-	MasterRotationKey        string   `yaml:"masterRotationKey"` // multibase or hex, PLC rotation key
-	KeyEncryptionKey         string   `yaml:"keyEncryptionKey"`  // 32-byte hex, AES-GCM for signing keys at rest
-	DisableRelayNotify       bool     `yaml:"disableRelayNotify"`
-	FirehoseRetentionHours   int      `yaml:"firehoseRetentionHours"`
-	ActorCacheTTLMinutes     int      `yaml:"actorCacheTtlMinutes"`
-	EntityReloadIntervalSecs int      `yaml:"entityReloadIntervalSeconds"`
+	PLCDirectory      string   `yaml:"plcDirectory"`
+	Relays            []string `yaml:"relays"`
+	Jetstream         string   `yaml:"jetstream"`
+	Appview           Appview  `yaml:"appview"`
+	Proxy             Proxy    `yaml:"proxy"`
+	DataDir           string   `yaml:"dataDir"`
+	MasterRotationKey string   `yaml:"masterRotationKey"` // multibase or hex, PLC rotation key
+	KeyEncryptionKey  string   `yaml:"keyEncryptionKey"`  // 32-byte hex, AES-GCM for signing keys at rest
+	// SessionSecret signs the access/refresh JWTs issued to atproto clients
+	// (app-password login). Optional: when empty it is derived from
+	// keyEncryptionKey, so no extra secret has to be provisioned.
+	SessionSecret            string `yaml:"sessionSecret"`
+	DisableRelayNotify       bool   `yaml:"disableRelayNotify"`
+	FirehoseRetentionHours   int    `yaml:"firehoseRetentionHours"`
+	ActorCacheTTLMinutes     int    `yaml:"actorCacheTtlMinutes"`
+	EntityReloadIntervalSecs int    `yaml:"entityReloadIntervalSeconds"`
 }
 
 type Config struct {
@@ -106,6 +120,12 @@ func Load(path string) (*Config, error) {
 	}
 	if c.Atproto.Appview.URL == "" {
 		c.Atproto.Appview.URL = "https://public.api.bsky.app"
+	}
+	if c.Atproto.Proxy.AppviewDID == "" {
+		c.Atproto.Proxy.AppviewDID = "did:web:api.bsky.app"
+	}
+	if c.Atproto.Proxy.ChatDID == "" {
+		c.Atproto.Proxy.ChatDID = "did:web:api.bsky.chat"
 	}
 	if c.Atproto.DataDir == "" {
 		c.Atproto.DataDir = "/data"

@@ -21,6 +21,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"github.com/concrnt/atproto/internal/apppass"
 	"github.com/concrnt/atproto/internal/appview"
 	"github.com/concrnt/atproto/internal/inbound"
 	"github.com/concrnt/atproto/internal/relay"
@@ -126,6 +127,9 @@ func (s *Server) Register(e *echo.Echo) {
 	e.GET("/atproto/api/resolve", s.handleResolveRecord)
 	e.GET("/atproto/api/author-feed", s.handleAuthorFeed)
 	e.POST("/atproto/api/import", s.handleImport)
+	e.GET("/atproto/api/app-passwords", s.handleListAppPasswords)
+	e.POST("/atproto/api/app-passwords", s.handleCreateAppPassword)
+	e.DELETE("/atproto/api/app-passwords/:id", s.handleRevokeAppPassword)
 }
 
 // requester extracts the authenticated CCID propagated by the concrnt gateway.
@@ -162,6 +166,11 @@ func (s *Server) handleCCInfo(c echo.Context) error {
 			ServiceName + ".resolve":      "/atproto/api/resolve{?uri}",
 			ServiceName + ".authorFeed":   "/atproto/api/author-feed{?actor,limit,cursor}",
 			ServiceName + ".import":       "/atproto/api/import",
+			// App passwords: log the official Bluesky app in to this bridge
+			// as the user's PDS (DMs); repo stays read-only.
+			ServiceName + ".appPasswords":      "/atproto/api/app-passwords",
+			ServiceName + ".createAppPassword": "/atproto/api/app-passwords",
+			ServiceName + ".revokeAppPassword": "/atproto/api/app-passwords/{id}",
 		},
 	})
 }
@@ -181,9 +190,92 @@ func (s *Server) handleInfo(c echo.Context) error {
 				"enabled": ent.Enabled,
 				"status":  ent.Status,
 			}
+			// What to type into the official app's login form.
+			resp["login"] = map[string]string{
+				"service":    "https://" + s.pdsHost,
+				"identifier": ent.Handle,
+			}
 		}
 	}
 	return c.JSON(http.StatusOK, resp)
+}
+
+func appPasswordJSON(r store.AppPassword) map[string]any {
+	m := map[string]any{
+		"id":        r.ID,
+		"name":      r.Name,
+		"createdAt": r.CreatedAt.UTC().Format(time.RFC3339),
+	}
+	if r.LastUsedAt != nil {
+		m["lastUsedAt"] = r.LastUsedAt.UTC().Format(time.RFC3339)
+	}
+	return m
+}
+
+func (s *Server) handleListAppPasswords(c echo.Context) error {
+	ent, err := s.entityOfRequester(c)
+	if ent == nil {
+		return err
+	}
+	rows, err := apppass.List(s.db, ent.DID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, appPasswordJSON(r))
+	}
+	return c.JSON(http.StatusOK, map[string]any{"appPasswords": out})
+}
+
+// handleCreateAppPassword issues a credential for logging the official
+// Bluesky app in here. The plaintext is returned once and never stored.
+func (s *Server) handleCreateAppPassword(c echo.Context) error {
+	ent, err := s.entityOfRequester(c)
+	if ent == nil {
+		return err
+	}
+	if ent.Status != "active" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "account is not active; call verify first"})
+	}
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := c.Bind(&body); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid body"})
+	}
+	row, plain, err := apppass.Create(s.db, ent.DID, body.Name)
+	switch {
+	case errors.Is(err, apppass.ErrInvalidName):
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	case errors.Is(err, apppass.ErrNameTaken):
+		return c.JSON(http.StatusConflict, map[string]string{"error": err.Error()})
+	case errors.Is(err, apppass.ErrTooMany):
+		return c.JSON(http.StatusConflict, map[string]string{"error": err.Error()})
+	case err != nil:
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	resp := appPasswordJSON(*row)
+	resp["password"] = plain
+	resp["login"] = map[string]string{
+		"service":    "https://" + s.pdsHost,
+		"identifier": ent.Handle,
+	}
+	return c.JSON(http.StatusCreated, resp)
+}
+
+func (s *Server) handleRevokeAppPassword(c echo.Context) error {
+	ent, err := s.entityOfRequester(c)
+	if ent == nil {
+		return err
+	}
+	if err := apppass.Revoke(s.db, ent.DID, c.Param("id")); err != nil {
+		if errors.Is(err, apppass.ErrNotFound) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "app password not found"})
+		}
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	return c.JSON(http.StatusOK, map[string]any{"revoked": true})
 }
 
 // handleSetup starts bridging: it mints a DID that claims the user's own

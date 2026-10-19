@@ -9,10 +9,13 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
+	"github.com/bluesky-social/indigo/atproto/atdata"
 	"github.com/bluesky-social/indigo/carstore"
 	"github.com/bluesky-social/indigo/events"
 	"github.com/bluesky-social/indigo/events/pebblepersist"
@@ -474,4 +477,150 @@ func (m *Manager) UidForDID(did string) (models.Uid, error) {
 		return 0, err
 	}
 	return ent.Uid, nil
+}
+
+// openRepo opens a read-only view of uid's current repo.
+func (m *Manager) openRepo(ctx context.Context, uid models.Uid) (*repo.Repo, error) {
+	head, err := m.cs.GetUserRepoHead(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	ds, err := m.cs.ReadOnlySession(uid)
+	if err != nil {
+		return nil, err
+	}
+	return repo.OpenRepo(ctx, ds, head)
+}
+
+// RecordItem is one entry of ListRecords.
+type RecordItem struct {
+	Rkey  string
+	CID   string
+	Value map[string]any
+}
+
+// GetRecordRaw reads a record as generic atproto data, so collections the
+// bridge has no typed decoder for (whatever a client stored) still round-trip.
+func (m *Manager) GetRecordRaw(ctx context.Context, did, collection, rkey string) (string, map[string]any, error) {
+	ent, err := m.entityByDID(did)
+	if err != nil {
+		return "", nil, err
+	}
+	r, err := m.openRepo(ctx, ent.Uid)
+	if err != nil {
+		return "", nil, err
+	}
+	cc, raw, err := r.GetRecordBytes(ctx, collection+"/"+rkey)
+	if err != nil {
+		return "", nil, err
+	}
+	val, err := atdata.UnmarshalCBOR(*raw)
+	if err != nil {
+		return "", nil, err
+	}
+	return cc.String(), val, nil
+}
+
+// ListRecords pages through one collection in rkey order. cursor is the
+// last rkey of the previous page; the returned cursor is empty on the last
+// page. Repos here are small, so the MST walk collects keys in memory.
+func (m *Manager) ListRecords(ctx context.Context, did, collection string, limit int, cursor string, reverse bool) ([]RecordItem, string, error) {
+	ent, err := m.entityByDID(did)
+	if err != nil {
+		return nil, "", err
+	}
+	r, err := m.openRepo(ctx, ent.Uid)
+	if err != nil {
+		return nil, "", err
+	}
+	type entry struct {
+		rkey string
+		cid  cid.Cid
+	}
+	var all []entry
+	prefix := collection + "/"
+	err = r.ForEach(ctx, prefix, func(k string, v cid.Cid) error {
+		if !strings.HasPrefix(k, prefix) {
+			return nil
+		}
+		all = append(all, entry{rkey: strings.TrimPrefix(k, prefix), cid: v})
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	if reverse {
+		for i, j := 0, len(all)-1; i < j; i, j = i+1, j-1 {
+			all[i], all[j] = all[j], all[i]
+		}
+	}
+	start := 0
+	if cursor != "" {
+		for i, e := range all {
+			if e.rkey == cursor {
+				start = i + 1
+				break
+			}
+		}
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	end := start + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	items := make([]RecordItem, 0, end-start)
+	for _, e := range all[start:end] {
+		_, raw, err := r.GetRecordBytes(ctx, prefix+e.rkey)
+		if err != nil {
+			return nil, "", err
+		}
+		val, err := atdata.UnmarshalCBOR(*raw)
+		if err != nil {
+			return nil, "", err
+		}
+		items = append(items, RecordItem{Rkey: e.rkey, CID: e.cid.String(), Value: val})
+	}
+	next := ""
+	if end < len(all) && len(items) > 0 {
+		next = items[len(items)-1].Rkey
+	}
+	return items, next, nil
+}
+
+// ListCollections returns the NSIDs that have at least one record in did's repo.
+func (m *Manager) ListCollections(ctx context.Context, did string) ([]string, error) {
+	ent, err := m.entityByDID(did)
+	if err != nil {
+		return nil, err
+	}
+	r, err := m.openRepo(ctx, ent.Uid)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var out []string
+	err = r.ForEach(ctx, "", func(k string, _ cid.Cid) error {
+		coll, _, ok := strings.Cut(k, "/")
+		if ok && !seen[coll] {
+			seen[coll] = true
+			out = append(out, coll)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// Rev returns the current repo revision of did.
+func (m *Manager) Rev(ctx context.Context, did string) (string, error) {
+	ent, err := m.entityByDID(did)
+	if err != nil {
+		return "", err
+	}
+	return m.cs.GetUserRepoRev(ctx, ent.Uid)
 }
