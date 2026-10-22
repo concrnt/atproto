@@ -12,11 +12,14 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 
+	"github.com/concrnt/atproto/internal/media"
+	"github.com/concrnt/atproto/internal/media/mediatest"
 	"github.com/concrnt/atproto/internal/store"
 )
 
@@ -80,24 +83,24 @@ func newTestService(t *testing.T) (*Service, *origin, string) {
 	o := newOrigin()
 	srv := httptest.NewServer(o)
 	t.Cleanup(srv.Close)
-	return NewService(db, t.TempDir()), o, srv.URL
+	return NewService(db, t.TempDir(), nil), o, srv.URL
 }
 
 func TestIngestStoresFileAndRow(t *testing.T) {
 	s, o, base := newTestService(t)
 	o.set("/a.png", "image/png; charset=binary", pngHeader)
 
-	blob, err := s.Ingest(context.Background(), "did:plc:x", base+"/a.png")
+	ing, err := s.Ingest(context.Background(), "did:plc:x", base+"/a.png")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if blob.MimeType != "image/png" {
-		t.Fatalf("mime = %q, want image/png (parameters stripped)", blob.MimeType)
+	if ing.Blob.MimeType != "image/png" {
+		t.Fatalf("mime = %q, want image/png (parameters stripped)", ing.Blob.MimeType)
 	}
-	if blob.Size != int64(len(pngHeader)) {
-		t.Fatalf("size = %d, want %d", blob.Size, len(pngHeader))
+	if ing.Blob.Size != int64(len(pngHeader)) {
+		t.Fatalf("size = %d, want %d", ing.Blob.Size, len(pngHeader))
 	}
-	cidStr := blob.Ref.String()
+	cidStr := ing.Blob.Ref.String()
 	data, err := os.ReadFile(s.path("did:plc:x", cidStr))
 	if err != nil {
 		t.Fatalf("blob file not written: %v", err)
@@ -123,14 +126,14 @@ func TestIngestVideo(t *testing.T) {
 	video := bytes.Repeat([]byte{0xab}, MaxImageSize+1) // over the image cap, fine for video
 	o.set("/v.mp4", "video/mp4", video)
 
-	blob, err := s.Ingest(context.Background(), "did:plc:x", base+"/v.mp4")
+	ing, err := s.Ingest(context.Background(), "did:plc:x", base+"/v.mp4")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if blob.MimeType != "video/mp4" || blob.Size != int64(len(video)) {
-		t.Fatalf("blob = %+v", blob)
+	if ing.Blob.MimeType != "video/mp4" || ing.Blob.Size != int64(len(video)) {
+		t.Fatalf("blob = %+v", ing.Blob)
 	}
-	if !IsVideo(blob.MimeType) {
+	if !IsVideo(ing.Blob.MimeType) {
 		t.Fatal("IsVideo false for video/mp4")
 	}
 }
@@ -160,14 +163,14 @@ func TestIngestSniffsMimeWithoutHeader(t *testing.T) {
 	s, o, base := newTestService(t)
 	o.set("/noct", "", pngHeader)
 
-	blob, err := s.Ingest(context.Background(), "did:plc:x", base+"/noct")
+	ing, err := s.Ingest(context.Background(), "did:plc:x", base+"/noct")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if blob.MimeType != "image/png" {
-		t.Fatalf("mime = %q, want image/png", blob.MimeType)
+	if ing.Blob.MimeType != "image/png" {
+		t.Fatalf("mime = %q, want image/png", ing.Blob.MimeType)
 	}
-	_, r, err := s.Open(context.Background(), "did:plc:x", blob.Ref.String())
+	_, r, err := s.Open(context.Background(), "did:plc:x", ing.Blob.Ref.String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,11 +184,11 @@ func TestIngestSniffsMimeWithoutHeader(t *testing.T) {
 func TestOpenRestoresMissingFileFromSource(t *testing.T) {
 	s, o, base := newTestService(t)
 	o.set("/a.png", "image/png", pngHeader)
-	blob, err := s.Ingest(context.Background(), "did:plc:x", base+"/a.png")
+	ing, err := s.Ingest(context.Background(), "did:plc:x", base+"/a.png")
 	if err != nil {
 		t.Fatal(err)
 	}
-	cidStr := blob.Ref.String()
+	cidStr := ing.Blob.Ref.String()
 	if err := os.Remove(s.path("did:plc:x", cidStr)); err != nil {
 		t.Fatal(err)
 	}
@@ -217,11 +220,11 @@ func TestOpenRestoresMissingFileFromSource(t *testing.T) {
 func TestOpenRejectsChangedSource(t *testing.T) {
 	s, o, base := newTestService(t)
 	o.set("/a.png", "image/png", pngHeader)
-	blob, err := s.Ingest(context.Background(), "did:plc:x", base+"/a.png")
+	ing, err := s.Ingest(context.Background(), "did:plc:x", base+"/a.png")
 	if err != nil {
 		t.Fatal(err)
 	}
-	cidStr := blob.Ref.String()
+	cidStr := ing.Blob.Ref.String()
 	os.Remove(s.path("did:plc:x", cidStr))
 	o.set("/a.png", "image/png", append(append([]byte{}, pngHeader...), 'x'))
 
@@ -250,11 +253,11 @@ func TestOpenRestoreIsDedupedAcrossConcurrentReaders(t *testing.T) {
 	s, o, base := newTestService(t)
 	video := bytes.Repeat([]byte{0xcd}, 1<<20)
 	o.set("/v.mp4", "video/mp4", video)
-	blob, err := s.Ingest(context.Background(), "did:plc:x", base+"/v.mp4")
+	ing, err := s.Ingest(context.Background(), "did:plc:x", base+"/v.mp4")
 	if err != nil {
 		t.Fatal(err)
 	}
-	cidStr := blob.Ref.String()
+	cidStr := ing.Blob.Ref.String()
 	os.Remove(s.path("did:plc:x", cidStr))
 	o.hits.Store(0)
 
@@ -284,4 +287,167 @@ func TestOpenRestoreIsDedupedAcrossConcurrentReaders(t *testing.T) {
 	if hits := o.hits.Load(); hits > 2 {
 		t.Fatalf("origin hits = %d, want restore to be deduplicated", hits)
 	}
+}
+
+// --- transcoding (skipped without ffmpeg) ---
+
+func newTranscodingService(t *testing.T) (*Service, *origin, string) {
+	t.Helper()
+	mediatest.Require(t)
+	s, o, base := newTestService(t)
+	tc, err := media.New("", "", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.tc = tc
+	return s, o, base
+}
+
+func probeFile(t *testing.T, s *Service, did, cidStr string) *media.Info {
+	t.Helper()
+	info, err := s.tc.Probe(context.Background(), s.path(did, cidStr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info
+}
+
+func TestIngestTranscodesNonMp4Video(t *testing.T) {
+	s, o, base := newTranscodingService(t)
+	mov := mediatest.Fixture(t, "mpeg4", "aac", "mov")
+	o.set("/clip.mov", "video/quicktime", mov)
+
+	ing, err := s.Ingest(context.Background(), "did:plc:x", base+"/clip.mov")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ing.Blob.MimeType != "video/mp4" {
+		t.Fatalf("mime = %q, want video/mp4", ing.Blob.MimeType)
+	}
+	if ing.Width != 320 || ing.Height != 240 {
+		t.Fatalf("dimensions = %dx%d", ing.Width, ing.Height)
+	}
+	cidStr := ing.Blob.Ref.String()
+	st, err := os.Stat(s.path("did:plc:x", cidStr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Size() != ing.Blob.Size {
+		t.Fatalf("size = %d, file is %d", ing.Blob.Size, st.Size())
+	}
+	if bytes.Equal(mov, mustRead(t, s.path("did:plc:x", cidStr))) {
+		t.Fatal("stored file is the untranscoded source")
+	}
+	info := probeFile(t, s, "did:plc:x", cidStr)
+	if info.VideoCodec != "h264" || info.AudioCodec != "aac" {
+		t.Fatalf("stored video = %+v", info)
+	}
+	entries, _ := os.ReadDir(filepath.Join(s.dataDir, "did:plc:x"))
+	if len(entries) != 1 {
+		t.Fatalf("temp files left behind: %d entries", len(entries))
+	}
+	var rec store.Blob
+	if err := s.db.First(&rec, "did = ? AND cid = ?", "did:plc:x", cidStr).Error; err != nil {
+		t.Fatal(err)
+	}
+	if rec.Mime != "video/mp4" || rec.SrcURL != base+"/clip.mov" {
+		t.Fatalf("row = %+v", rec)
+	}
+}
+
+func TestIngestReencodesNonH264Mp4(t *testing.T) {
+	s, o, base := newTranscodingService(t)
+	src := mediatest.Fixture(t, "mpeg4", "aac", "mp4")
+	o.set("/old.mp4", "video/mp4", src)
+
+	ing, err := s.Ingest(context.Background(), "did:plc:x", base+"/old.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(src, mustRead(t, s.path("did:plc:x", ing.Blob.Ref.String()))) {
+		t.Fatal("mpeg4-in-mp4 was passed through")
+	}
+	if info := probeFile(t, s, "did:plc:x", ing.Blob.Ref.String()); info.VideoCodec != "h264" {
+		t.Fatalf("stored video = %+v", info)
+	}
+}
+
+func TestIngestPassesThroughValidMp4(t *testing.T) {
+	s, o, base := newTranscodingService(t)
+	src := mediatest.Fixture(t, "libx264", "aac", "mp4")
+	o.set("/good.mp4", "video/mp4", src)
+
+	ing, err := s.Ingest(context.Background(), "did:plc:x", base+"/good.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(src, mustRead(t, s.path("did:plc:x", ing.Blob.Ref.String()))) {
+		t.Fatal("valid mp4 was re-encoded")
+	}
+	if ing.Blob.Size != int64(len(src)) || ing.Width != 320 || ing.Height != 240 {
+		t.Fatalf("ingested = %+v", ing)
+	}
+}
+
+func TestIngestVideoWithoutTranscoderIsUnchecked(t *testing.T) {
+	// No ffmpeg: mp4 passes as before, even when it is not a bsky-playable
+	// mp4, and other containers are rejected.
+	s, o, base := newTestService(t)
+	o.set("/v.mp4", "video/mp4", []byte("not really mp4"))
+	o.set("/v.mov", "video/quicktime", []byte("mov"))
+	ing, err := s.Ingest(context.Background(), "did:plc:x", base+"/v.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ing.Width != 0 || ing.Height != 0 {
+		t.Fatalf("dimensions without ffprobe = %dx%d", ing.Width, ing.Height)
+	}
+	if _, err := s.Ingest(context.Background(), "did:plc:x", base+"/v.mov"); !errors.Is(err, ErrUnsupportedMedia) {
+		t.Fatalf("err = %v, want ErrUnsupportedMedia", err)
+	}
+}
+
+func TestIngestRejectsUndecodableVideo(t *testing.T) {
+	s, o, base := newTranscodingService(t)
+	o.set("/bad.webm", "video/webm", []byte("definitely not webm"))
+	if _, err := s.Ingest(context.Background(), "did:plc:x", base+"/bad.webm"); err == nil {
+		t.Fatal("expected error")
+	}
+	entries, _ := os.ReadDir(filepath.Join(s.dataDir, "did:plc:x"))
+	if len(entries) != 0 {
+		t.Fatalf("temp files left behind: %d entries", len(entries))
+	}
+}
+
+func TestOpenRestoresTranscodedBlob(t *testing.T) {
+	s, o, base := newTranscodingService(t)
+	o.set("/clip.mov", "video/quicktime", mediatest.Fixture(t, "mpeg4", "aac", "mov"))
+	ing, err := s.Ingest(context.Background(), "did:plc:x", base+"/clip.mov")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cidStr := ing.Blob.Ref.String()
+	want := mustRead(t, s.path("did:plc:x", cidStr))
+	if err := os.Remove(s.path("did:plc:x", cidStr)); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, r, err := s.Open(context.Background(), "did:plc:x", cidStr)
+	if err != nil {
+		t.Fatalf("restore via re-transcode failed: %v", err)
+	}
+	defer r.Close()
+	got, _ := io.ReadAll(r)
+	if rec.Mime != "video/mp4" || !bytes.Equal(got, want) {
+		t.Fatal("restored blob differs from original transcode")
+	}
+}
+
+func mustRead(t *testing.T, p string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

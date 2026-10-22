@@ -413,12 +413,15 @@ func (d *Daemon) exportMessage(ctx context.Context, entity *store.Entity, cckv s
 		if !blobs.IsVideo(m.MediaType) {
 			continue
 		}
-		blob, err := d.blobs.Ingest(ctx, entity.DID, m.MediaURL)
+		ing, err := d.blobs.Ingest(ctx, entity.DID, m.MediaURL)
 		if err != nil {
 			slog.Warn("failed to ingest video", "url", m.MediaURL, "error", err)
 			continue
 		}
-		opts.Video = blob
+		opts.Video = ing.Blob
+		if ing.Width > 0 && ing.Height > 0 {
+			opts.VideoAspect = &appbsky.EmbedDefs_AspectRatio{Width: int64(ing.Width), Height: int64(ing.Height)}
+		}
 		break
 	}
 	type imgSrc struct{ url, alt string }
@@ -435,13 +438,13 @@ func (d *Daemon) exportMessage(ctx context.Context, entity *store.Entity, cckv s
 		if opts.Video != nil || len(opts.Images) >= 4 {
 			break
 		}
-		blob, err := d.blobs.Ingest(ctx, entity.DID, src.url)
+		ing, err := d.blobs.Ingest(ctx, entity.DID, src.url)
 		if err != nil {
 			slog.Warn("failed to ingest image", "url", src.url, "error", err)
 			continue
 		}
 		opts.Images = append(opts.Images, &appbsky.EmbedImages_Image{
-			Image: blob,
+			Image: ing.Blob,
 			Alt:   src.alt,
 		})
 	}
@@ -574,15 +577,15 @@ func (d *Daemon) SyncProfile(ctx context.Context, entity *store.Entity) error {
 
 	profile := tobsky.BuildProfile(doc.Value.Username, doc.Value.Description, nil)
 	if doc.Value.Avatar != "" {
-		if blob, err := d.blobs.Ingest(ctx, entity.DID, doc.Value.Avatar); err == nil {
-			profile.Avatar = blob
+		if ing, err := d.blobs.Ingest(ctx, entity.DID, doc.Value.Avatar); err == nil {
+			profile.Avatar = ing.Blob
 		} else {
 			slog.Warn("failed to ingest avatar", "url", doc.Value.Avatar, "error", err)
 		}
 	}
 	if doc.Value.Banner != "" {
-		if blob, err := d.blobs.Ingest(ctx, entity.DID, doc.Value.Banner); err == nil {
-			profile.Banner = blob
+		if ing, err := d.blobs.Ingest(ctx, entity.DID, doc.Value.Banner); err == nil {
+			profile.Banner = ing.Blob
 		}
 	}
 

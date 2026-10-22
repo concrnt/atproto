@@ -45,3 +45,11 @@ atproto:
   # actorCacheTtlMinutes: 60
   # entityReloadIntervalSeconds: 60
   # disableRelayNotify: false
+  # Video transcoding on ingest. ffmpeg/ffprobe are looked up on PATH (the
+  # Docker image bundles static builds). Videos that are not already an
+  # H.264/AAC mp4 are re-encoded; without ffmpeg only video/mp4 is accepted.
+  # media:
+  #   ffmpegPath: ffmpeg
+  #   ffprobePath: ffprobe
+  #   disableTranscode: false
+  #   transcodeTimeoutSeconds: 600

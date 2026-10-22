@@ -29,6 +29,20 @@ func TestAssemblePostVideoEmbed(t *testing.T) {
 	}
 }
 
+func TestAssemblePostVideoAspectRatio(t *testing.T) {
+	video := testBlob(t, "video/mp4")
+	post := AssemblePost(PostParts{Text: "clip"}, PostOptions{CreatedAt: time.Now(), Video: video,
+		VideoAspect: &appbsky.EmbedDefs_AspectRatio{Width: 1280, Height: 720}})
+	ar := post.Embed.EmbedVideo.AspectRatio
+	if ar == nil || ar.Width != 1280 || ar.Height != 720 {
+		t.Fatalf("aspectRatio = %+v", ar)
+	}
+	post = AssemblePost(PostParts{Text: "clip"}, PostOptions{CreatedAt: time.Now(), Video: video})
+	if post.Embed.EmbedVideo.AspectRatio != nil {
+		t.Fatal("aspectRatio set without VideoAspect")
+	}
+}
+
 func TestAssemblePostVideoWithQuote(t *testing.T) {
 	video := testBlob(t, "video/mp4")
 	quote := &StrongRef{URI: "at://did:plc:q/app.bsky.feed.post/1", CID: "bafyq"}

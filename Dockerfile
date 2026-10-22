@@ -11,8 +11,13 @@ COPY . .
 ARG VERSION
 RUN CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION:-$(git describe --tags --always 2>/dev/null || echo docker)}" -o /bridge ./cmd/bridge
 
+# Static ffmpeg/ffprobe (amd64 + arm64) for video transcoding on blob
+# ingest; distroless has no package manager and these need no libc.
+FROM mwader/static-ffmpeg:9.0.2 AS ffmpeg
+
 FROM gcr.io/distroless/static-debian12
 COPY --from=builder /bridge /bridge
+COPY --from=ffmpeg /ffmpeg /ffprobe /usr/local/bin/
 # CONFIG_PATH may also point at a directory (every file in it is deep-merged in
 # name order), e.g. a ConfigMap + Secret projected volume on Kubernetes.
 ENV CONFIG_PATH=/app/config.yaml

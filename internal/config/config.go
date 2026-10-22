@@ -66,6 +66,17 @@ type Atproto struct {
 	FirehoseRetentionHours   int    `yaml:"firehoseRetentionHours"`
 	ActorCacheTTLMinutes     int    `yaml:"actorCacheTtlMinutes"`
 	EntityReloadIntervalSecs int    `yaml:"entityReloadIntervalSeconds"`
+	Media                    Media  `yaml:"media"`
+}
+
+// Media configures video transcoding on blob ingest. ffmpeg/ffprobe are
+// looked up on PATH by default; when either is missing transcoding is
+// disabled and only video/mp4 is accepted, unchecked.
+type Media struct {
+	FFmpegPath              string `yaml:"ffmpegPath"`
+	FFprobePath             string `yaml:"ffprobePath"`
+	DisableTranscode        bool   `yaml:"disableTranscode"`
+	TranscodeTimeoutSeconds int    `yaml:"transcodeTimeoutSeconds"`
 }
 
 type Config struct {
@@ -138,6 +149,15 @@ func Load(path string) (*Config, error) {
 	}
 	if c.Atproto.EntityReloadIntervalSecs == 0 {
 		c.Atproto.EntityReloadIntervalSecs = 60
+	}
+	if c.Atproto.Media.FFmpegPath == "" {
+		c.Atproto.Media.FFmpegPath = "ffmpeg"
+	}
+	if c.Atproto.Media.FFprobePath == "" {
+		c.Atproto.Media.FFprobePath = "ffprobe"
+	}
+	if c.Atproto.Media.TranscodeTimeoutSeconds == 0 {
+		c.Atproto.Media.TranscodeTimeoutSeconds = 600
 	}
 
 	if c.Concrnt.CCID == "" || c.Concrnt.Domain == "" || c.Concrnt.PrivateKey == "" {

@@ -28,8 +28,11 @@ type PostOptions struct {
 	// Video is the single ingested mp4 blob. bsky allows one video per post
 	// and never alongside images, so when set it takes precedence over Images.
 	Video *lexutil.LexBlob
-	Reply *ReplyRefs
-	Quote *StrongRef
+	// VideoAspect is the video's display aspect ratio (from ffprobe); nil
+	// omits aspectRatio from the embed.
+	VideoAspect *appbsky.EmbedDefs_AspectRatio
+	Reply       *ReplyRefs
+	Quote       *StrongRef
 	// TruncatedLink renders an external card linking back to the full post on
 	// concrnt. Only used when parts.Truncated and no other embed competes.
 	TruncatedLink *ExternalLink
@@ -75,13 +78,13 @@ func AssemblePost(parts PostParts, opts PostOptions) *appbsky.FeedPost {
 					Record:        opts.Quote.lex(),
 				},
 				Media: &appbsky.EmbedRecordWithMedia_Media{
-					EmbedVideo: videoEmbed(opts.Video),
+					EmbedVideo: videoEmbed(opts.Video, opts.VideoAspect),
 				},
 			},
 		}
 	case opts.Video != nil:
 		post.Embed = &appbsky.FeedPost_Embed{
-			EmbedVideo: videoEmbed(opts.Video),
+			EmbedVideo: videoEmbed(opts.Video, opts.VideoAspect),
 		}
 	case len(opts.Images) > 0 && opts.Quote != nil:
 		post.Embed = &appbsky.FeedPost_Embed{
@@ -129,10 +132,11 @@ func AssemblePost(parts PostParts, opts PostOptions) *appbsky.FeedPost {
 	return post
 }
 
-func videoEmbed(blob *lexutil.LexBlob) *appbsky.EmbedVideo {
+func videoEmbed(blob *lexutil.LexBlob, aspect *appbsky.EmbedDefs_AspectRatio) *appbsky.EmbedVideo {
 	return &appbsky.EmbedVideo{
 		LexiconTypeID: "app.bsky.embed.video",
 		Video:         blob,
+		AspectRatio:   aspect,
 	}
 }
 

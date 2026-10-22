@@ -33,6 +33,7 @@ import (
 	"github.com/concrnt/atproto/internal/core"
 	"github.com/concrnt/atproto/internal/inbound"
 	"github.com/concrnt/atproto/internal/keys"
+	"github.com/concrnt/atproto/internal/media"
 	"github.com/concrnt/atproto/internal/mgmt"
 	"github.com/concrnt/atproto/internal/outbound"
 	"github.com/concrnt/atproto/internal/pds"
@@ -133,7 +134,20 @@ func run() error {
 	// Core connection first: its resolved FQDN is the public origin the
 	// gateway serves on, which doubles as the bridge's PDS host (the atproto
 	// serviceEndpoint and the relay crawl hostname).
-	blobSvc := blobs.NewService(db, cfg.Atproto.DataDir)
+	var transcoder *media.Transcoder
+	if cfg.Atproto.Media.DisableTranscode {
+		slog.Warn("video transcoding disabled by config; only video/mp4 is accepted")
+	} else {
+		tc, err := media.New(cfg.Atproto.Media.FFmpegPath, cfg.Atproto.Media.FFprobePath,
+			time.Duration(cfg.Atproto.Media.TranscodeTimeoutSeconds)*time.Second)
+		if err != nil {
+			slog.Warn("video transcoding disabled; only video/mp4 is accepted", "error", err)
+		} else {
+			transcoder = tc
+			slog.Info("video transcoding enabled", "ffmpeg", tc.Version(ctx))
+		}
+	}
+	blobSvc := blobs.NewService(db, cfg.Atproto.DataDir, transcoder)
 	coreSvc := core.NewService(cfg.Concrnt.CCID, cfg.Concrnt.Domain, cfg.Concrnt.PrivateKey)
 	av := appview.NewClient(cfg.Atproto.Appview.URL)
 	pdsHost := coreSvc.FQDN()

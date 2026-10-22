@@ -27,6 +27,8 @@ import (
 	"github.com/concrnt/atproto/internal/blobs"
 	"github.com/concrnt/atproto/internal/core"
 	"github.com/concrnt/atproto/internal/keys"
+	"github.com/concrnt/atproto/internal/media"
+	"github.com/concrnt/atproto/internal/media/mediatest"
 	"github.com/concrnt/atproto/internal/outbound"
 	"github.com/concrnt/atproto/internal/plcm"
 	"github.com/concrnt/atproto/internal/repoman"
@@ -101,7 +103,15 @@ func TestDevnetOutboundPath(t *testing.T) {
 	}
 
 	blobDir := t.TempDir()
-	blobSvc := blobs.NewService(db, blobDir)
+	// With ffmpeg installed the real transcoding path is exercised; without
+	// it the video steps below fall back to a passthrough-only service.
+	var tc *media.Transcoder
+	if transcoder, err := media.New("", "", time.Minute); err == nil {
+		tc = transcoder
+	} else {
+		t.Logf("ffmpeg unavailable, transcoding steps skipped: %v", err)
+	}
+	blobSvc := blobs.NewService(db, blobDir, tc)
 	daemon := outbound.NewDaemon(db, coreSvc, repos, blobSvc, "", time.Second)
 	go daemon.Run(ctx, events)
 	time.Sleep(500 * time.Millisecond) // let the daemon load entities
@@ -151,7 +161,12 @@ func TestDevnetOutboundPath(t *testing.T) {
 	// A post with a video attachment becomes an app.bsky.embed.video record
 	// whose blob is ingested from the media URL; losing the local blob file
 	// must be recoverable from that URL through the getBlob path.
+	// A valid H.264/AAC mp4 is stored byte for byte (no transcode), so the
+	// restore path can be checked against the source bytes.
 	video := bytes.Repeat([]byte{0x5a}, 300_000)
+	if tc != nil {
+		video = mediatest.Fixture(t, "libx264", "aac", "mp4")
+	}
 	var mediaHits int
 	media := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mediaHits++
@@ -221,6 +236,10 @@ func TestDevnetOutboundPath(t *testing.T) {
 		t.Logf("video cleanup delete failed: %v", err)
 	}
 
+	if tc != nil {
+		testDevnetTranscodedVideo(ctx, t, db, repos, blobSvc, coreSvc, blobDir, ccid, did, home)
+	}
+
 	// Cleanup on the devnet side.
 	del := concrnt.Document[string]{
 		Kind: "delete", Schema: world.SchemaDelete, Value: postKey,
@@ -246,5 +265,94 @@ func TestDevnetOutboundPath(t *testing.T) {
 		if _, err := repos.GetRecordJSON(ctx, did, "app.bsky.actor.profile", "self"); err != nil {
 			t.Errorf("repo unreadable after delete: %v", err)
 		}
+	}
+}
+
+// testDevnetTranscodedVideo posts a QuickTime (mpeg4) clip: the daemon must
+// transcode it to an H.264/AAC mp4 blob, record aspectRatio from ffprobe,
+// and be able to rebuild the blob by re-transcoding after file loss.
+func testDevnetTranscodedVideo(ctx context.Context, t *testing.T, db *gorm.DB, repos *repoman.Manager,
+	blobSvc *blobs.Service, coreSvc *core.Service, blobDir, ccid, did, home string) {
+	t.Helper()
+	mov := mediatest.Fixture(t, "mpeg4", "aac", "mov")
+	var hits int
+	media := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "video/quicktime")
+		w.Write(mov)
+	}))
+	defer media.Close()
+
+	key := fmt.Sprintf("cckv://%s/e2etest/%d", ccid, time.Now().UnixNano())
+	doc := concrnt.Document[world.MessageValue]{
+		Kind: "record", Key: key, Schema: world.SchemaMarkdown,
+		Value: world.MessageValue{
+			Body:   "outbound e2e transcoded video post",
+			Medias: []world.Media{{MediaURL: media.URL + "/clip.mov", MediaType: "video/quicktime"}},
+		},
+		Author: ccid, CreatedAt: time.Now().UTC(), Distributes: &[]string{home},
+	}
+	if _, err := core.Commit(ctx, coreSvc, doc); err != nil {
+		t.Fatalf("mov post commit failed: %v", err)
+	}
+	var m store.URIMap
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if err := db.Where("cc_uri = ? AND ref_type = ?", key, "outbound-post").First(&m).Error; err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the daemon to export the mov post")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	defer func() {
+		if _, err := core.Commit(ctx, coreSvc, concrnt.Document[string]{
+			Kind: "delete", Schema: world.SchemaDelete, Value: key,
+			Author: ccid, CreatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Logf("mov cleanup delete failed: %v", err)
+		}
+	}()
+
+	rec, err := repos.GetRecordJSON(ctx, did, m.Collection, m.Rkey)
+	if err != nil {
+		t.Fatalf("mov record not readable: %v", err)
+	}
+	for _, want := range []string{`"app.bsky.embed.video"`, `"video/mp4"`, `"aspectRatio"`, `"width":320`, `"height":240`} {
+		if !strings.Contains(string(rec), want) {
+			t.Errorf("transcoded record lacks %s: %s", want, rec)
+		}
+	}
+	if strings.Contains(string(rec), "video/quicktime") {
+		t.Errorf("record still references the source mime: %s", rec)
+	}
+
+	var row store.Blob
+	if err := db.Where("did = ? AND src_url = ?", did, media.URL+"/clip.mov").First(&row).Error; err != nil {
+		t.Fatalf("transcoded blob row missing: %v", err)
+	}
+	if row.Mime != "video/mp4" || row.Size == int64(len(mov)) {
+		t.Errorf("blob row = %+v (source was %d bytes of quicktime)", row, len(mov))
+	}
+	path := filepath.Join(blobDir, "blobs", did, row.CID)
+	stored, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	_, r, err := blobSvc.Open(ctx, did, row.CID)
+	if err != nil {
+		t.Fatalf("transcoded blob not restored after file loss: %v", err)
+	}
+	restored, _ := io.ReadAll(r)
+	r.Close()
+	if !bytes.Equal(restored, stored) {
+		t.Error("re-transcoded blob differs from the original transcode")
+	}
+	if hits != 2 {
+		t.Errorf("media origin hits = %d, want 2 (ingest + restore)", hits)
 	}
 }
