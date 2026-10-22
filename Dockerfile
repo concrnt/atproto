@@ -15,7 +15,15 @@ RUN CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION:-$(git describe -
 # ingest; distroless has no package manager and these need no libc.
 FROM mwader/static-ffmpeg:9.0.2 AS ffmpeg
 
+# CA bundle: distroless ships its own, which lagged behind the eMudhra intermediate CA
+# compromise (2026-10), and the golang builder image is not always current either, so
+# build a fresh Debian bundle here. The CI workflow excludes this stage from the layer
+# cache (no-cache-filters) so apt really runs on every build.
+FROM debian:trixie-slim AS certificates
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
+
 FROM gcr.io/distroless/static-debian12
+COPY --from=certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /bridge /bridge
 COPY --from=ffmpeg /ffmpeg /ffprobe /usr/local/bin/
 # CONFIG_PATH may also point at a directory (every file in it is deep-merged in
