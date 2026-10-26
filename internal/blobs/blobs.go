@@ -9,11 +9,11 @@
 // (concrnt media URLs are immutable); a re-fetch that hashes to a different
 // CID is rejected rather than served.
 //
-// Videos may be transcoded on ingest (see package media); the stored blob is
-// then ffmpeg's output, not the source bytes. A re-fetch runs the same
-// pipeline, so restoring such a blob works only while ffmpeg produces
-// identical output (same build, same flags). After an ffmpeg upgrade a lost
-// transcoded file is treated like changed content: not served.
+// Videos may be transcoded and images are re-encoded on ingest (see package
+// media); the stored blob is then ffmpeg's output, not the source bytes. A
+// re-fetch runs the same pipeline, so restoring such a blob works only while
+// ffmpeg produces identical output (same build, same flags). After an ffmpeg
+// upgrade a lost transcoded file is treated like changed content: not served.
 package blobs
 
 import (
@@ -43,9 +43,16 @@ import (
 )
 
 const (
-	// MaxImageSize caps ingested images. bsky's own image limit is lower
-	// (the appview CDN resizes anyway); this is only the ingest cap.
-	MaxImageSize = 5 << 20 // 5MB
+	// DefaultImageMaxBytes caps image blobs. app.bsky.embed.images allows
+	// 2,000,000 today; 1,000,000 is the historical limit, what the official
+	// PDS enforces on upload and what the official app compresses to, so it
+	// is the safe target for every client.
+	DefaultImageMaxBytes = media.DefaultImageMaxBytes
+	// DefaultImageMaxDimension caps the long side of re-encoded images.
+	DefaultImageMaxDimension = media.DefaultImageMaxSide
+	// DefaultImageSourceMaxBytes caps image downloads when ffmpeg re-encodes
+	// them (camera HEIC/JPEG sources run several MB).
+	DefaultImageSourceMaxBytes = 20 << 20 // 20MB
 	// MaxVideoSize matches app.bsky.embed.video's documented blob limit.
 	MaxVideoSize = 100 << 20 // 100MB
 	// MaxBlobSize is the largest blob of any kind; the per-kind cap is
@@ -59,27 +66,32 @@ const (
 	responseHeaderTimeout = 30 * time.Second
 )
 
-// allowedMimes maps a media type to its ingest cap. The video entry mirrors
-// app.bsky.embed.video's `accept` list (mp4 only); other video/* types are
-// accepted on top of this when a transcoder is configured (see limitFor).
-var allowedMimes = map[string]int64{
-	"image/jpeg": MaxImageSize,
-	"image/png":  MaxImageSize,
-	"image/webp": MaxImageSize,
-	"image/gif":  MaxImageSize,
-	"image/avif": MaxImageSize,
-	"video/mp4":  MaxVideoSize,
+// passthroughImageMimes are the image types accepted unchanged when no
+// transcoder is available: what Bluesky clients render natively. With ffmpeg
+// any image/* is accepted and re-encoded (see limitFor).
+var passthroughImageMimes = map[string]bool{
+	"image/jpeg": true,
+	"image/png":  true,
+	"image/webp": true,
+	"image/gif":  true,
+	"image/avif": true,
 }
 
 // limitFor returns the ingest cap for a media type, and whether the type is
-// accepted at all. Any video/* is accepted when ffmpeg is available, since
-// the transcoder turns it into mp4.
+// accepted at all. With a transcoder any video/* (turned into mp4) and any
+// image/* (re-encoded under the image cap) is accepted; without one only
+// video/mp4 and the passthrough image types are, and images must already be
+// under the image cap.
 func (s *Service) limitFor(mime string) (int64, bool) {
-	if limit, ok := allowedMimes[mime]; ok {
-		return limit, true
-	}
-	if s.tc != nil && IsVideo(mime) {
+	switch {
+	case mime == "video/mp4":
 		return MaxVideoSize, true
+	case s.tc != nil && IsVideo(mime):
+		return MaxVideoSize, true
+	case s.tc != nil && IsImage(mime):
+		return s.imageSourceMaxBytes, true
+	case passthroughImageMimes[mime]:
+		return s.imageMaxBytes, true
 	}
 	return 0, false
 }
@@ -94,9 +106,14 @@ var ErrTooLarge = errors.New("media exceeds size limit")
 // does not hash to the recorded CID.
 var ErrContentChanged = errors.New("source content no longer matches blob cid")
 
-// IsVideo reports whether mime is an allowed video type.
+// IsVideo reports whether mime is a video type.
 func IsVideo(mime string) bool {
 	return strings.HasPrefix(mime, "video/")
+}
+
+// IsImage reports whether mime is an image type.
+func IsImage(mime string) bool {
+	return strings.HasPrefix(mime, "image/")
 }
 
 type Service struct {
@@ -106,14 +123,39 @@ type Service struct {
 	// tc is nil when ffmpeg is unavailable or transcoding is disabled.
 	tc *media.Transcoder
 
+	imageMaxBytes       int64
+	imageMaxDimension   int
+	imageSourceMaxBytes int64
+
 	// restoring dedups concurrent re-fetches of the same missing blob.
 	restoringMu sync.Mutex
 	restoring   map[string]*sync.WaitGroup
 }
 
+// Options tunes image handling. Zero values take the Default* constants.
+type Options struct {
+	// ImageMaxBytes caps stored image blobs (re-encoded with ffmpeg, or the
+	// passthrough limit without it).
+	ImageMaxBytes int64
+	// ImageMaxDimension caps the long side of re-encoded images in pixels.
+	ImageMaxDimension int
+	// ImageSourceMaxBytes caps image downloads when they will be re-encoded.
+	ImageSourceMaxBytes int64
+}
+
 // NewService stores blobs under dataDir/blobs. tc may be nil (no transcoding:
-// only video/mp4 is accepted and passed through unchecked).
-func NewService(db *gorm.DB, dataDir string, tc *media.Transcoder) *Service {
+// only video/mp4 and the passthrough image types are accepted, unchecked
+// apart from the size caps).
+func NewService(db *gorm.DB, dataDir string, tc *media.Transcoder, opts Options) *Service {
+	if opts.ImageMaxBytes <= 0 {
+		opts.ImageMaxBytes = DefaultImageMaxBytes
+	}
+	if opts.ImageMaxDimension <= 0 {
+		opts.ImageMaxDimension = DefaultImageMaxDimension
+	}
+	if opts.ImageSourceMaxBytes <= 0 {
+		opts.ImageSourceMaxBytes = DefaultImageSourceMaxBytes
+	}
 	return &Service{
 		db:      db,
 		dataDir: filepath.Join(dataDir, "blobs"),
@@ -122,7 +164,10 @@ func NewService(db *gorm.DB, dataDir string, tc *media.Transcoder) *Service {
 			Timeout:   fetchTimeout,
 			Transport: &http.Transport{ResponseHeaderTimeout: responseHeaderTimeout},
 		},
-		restoring: map[string]*sync.WaitGroup{},
+		imageMaxBytes:       opts.ImageMaxBytes,
+		imageMaxDimension:   opts.ImageMaxDimension,
+		imageSourceMaxBytes: opts.ImageSourceMaxBytes,
+		restoring:           map[string]*sync.WaitGroup{},
 	}
 }
 
@@ -131,7 +176,8 @@ func (s *Service) path(did, cidStr string) string {
 }
 
 // Ingested is the result of Ingest: the blob reference for records plus, for
-// videos probed with ffprobe, the display dimensions (0 when unknown).
+// media that went through ffprobe (videos and re-encoded images), the display
+// dimensions (0 when unknown).
 type Ingested struct {
 	Blob   *lexutil.LexBlob
 	Width  int
@@ -285,8 +331,13 @@ func (s *Service) download(ctx context.Context, did, url, wantCID string) (*fetc
 	}
 
 	f := &fetched{mime: mimeType, size: n}
-	if IsVideo(mimeType) && s.tc != nil {
-		outName, err := s.prepareVideo(ctx, dir, tmpName, url, f)
+	if s.tc != nil && (IsVideo(mimeType) || IsImage(mimeType)) {
+		var outName string
+		if IsVideo(mimeType) {
+			outName, err = s.prepareVideo(ctx, dir, tmpName, url, f)
+		} else {
+			outName, err = s.prepareImage(ctx, dir, tmpName, url, f)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -358,6 +409,33 @@ func (s *Service) prepareVideo(ctx context.Context, dir, in, url string, f *fetc
 	f.size = st.Size()
 	f.width, f.height = outInfo.Width, outInfo.Height
 	return outName, nil
+}
+
+// prepareImage re-encodes the downloaded image at in (JPEG, or PNG for alpha
+// sources; small animated GIFs pass through) under the image caps, fills f's
+// mime, size and dimensions, and returns the path of the file to keep.
+func (s *Service) prepareImage(ctx context.Context, dir, in, url string, f *fetched) (string, error) {
+	started := time.Now()
+	res, err := s.tc.PrepareImage(ctx, in, f.mime, dir, media.ImageOptions{
+		MaxBytes: s.imageMaxBytes,
+		MaxSide:  s.imageMaxDimension,
+	})
+	if errors.Is(err, media.ErrImageTooLarge) {
+		return "", fmt.Errorf("%w: image %s: %v", ErrTooLarge, url, err)
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to re-encode image %s: %w", url, err)
+	}
+	if res.Path != in {
+		slog.Info("re-encoded image",
+			"url", url, "from", f.mime, "to", res.Mime,
+			"inBytes", f.size, "outBytes", res.Size, "size", fmt.Sprintf("%dx%d", res.Width, res.Height),
+			"attempts", res.Attempts, "took", time.Since(started).Round(time.Millisecond))
+	}
+	f.mime = res.Mime
+	f.size = res.Size
+	f.width, f.height = res.Width, res.Height
+	return res.Path, nil
 }
 
 // hashFile returns the raw CIDv1 (sha2-256) of the file at path.

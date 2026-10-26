@@ -136,18 +136,25 @@ func run() error {
 	// serviceEndpoint and the relay crawl hostname).
 	var transcoder *media.Transcoder
 	if cfg.Atproto.Media.DisableTranscode {
-		slog.Warn("video transcoding disabled by config; only video/mp4 is accepted")
+		slog.Warn("media transcoding disabled by config; only video/mp4 and native image types pass through unchecked",
+			"imageMaxBytes", cfg.Atproto.Media.ImageMaxBytes)
 	} else {
 		tc, err := media.New(cfg.Atproto.Media.FFmpegPath, cfg.Atproto.Media.FFprobePath,
 			time.Duration(cfg.Atproto.Media.TranscodeTimeoutSeconds)*time.Second)
 		if err != nil {
-			slog.Warn("video transcoding disabled; only video/mp4 is accepted", "error", err)
+			slog.Warn("media transcoding disabled; only video/mp4 and native image types pass through unchecked",
+				"error", err, "imageMaxBytes", cfg.Atproto.Media.ImageMaxBytes)
 		} else {
 			transcoder = tc
-			slog.Info("video transcoding enabled", "ffmpeg", tc.Version(ctx))
+			slog.Info("media transcoding enabled", "ffmpeg", tc.Version(ctx),
+				"imageMaxBytes", cfg.Atproto.Media.ImageMaxBytes, "imageMaxDimension", cfg.Atproto.Media.ImageMaxDimension)
 		}
 	}
-	blobSvc := blobs.NewService(db, cfg.Atproto.DataDir, transcoder)
+	blobSvc := blobs.NewService(db, cfg.Atproto.DataDir, transcoder, blobs.Options{
+		ImageMaxBytes:       cfg.Atproto.Media.ImageMaxBytes,
+		ImageMaxDimension:   cfg.Atproto.Media.ImageMaxDimension,
+		ImageSourceMaxBytes: cfg.Atproto.Media.ImageSourceMaxBytes,
+	})
 	coreSvc := core.NewService(cfg.Concrnt.CCID, cfg.Concrnt.Domain, cfg.Concrnt.PrivateKey)
 	av := appview.NewClient(cfg.Atproto.Appview.URL)
 	pdsHost := coreSvc.FQDN()

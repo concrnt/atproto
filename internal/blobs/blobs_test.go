@@ -83,7 +83,7 @@ func newTestService(t *testing.T) (*Service, *origin, string) {
 	o := newOrigin()
 	srv := httptest.NewServer(o)
 	t.Cleanup(srv.Close)
-	return NewService(db, t.TempDir(), nil), o, srv.URL
+	return NewService(db, t.TempDir(), nil, Options{}), o, srv.URL
 }
 
 func TestIngestStoresFileAndRow(t *testing.T) {
@@ -123,7 +123,7 @@ func TestIngestStoresFileAndRow(t *testing.T) {
 
 func TestIngestVideo(t *testing.T) {
 	s, o, base := newTestService(t)
-	video := bytes.Repeat([]byte{0xab}, MaxImageSize+1) // over the image cap, fine for video
+	video := bytes.Repeat([]byte{0xab}, DefaultImageMaxBytes+1) // over the image cap, fine for video
 	o.set("/v.mp4", "video/mp4", video)
 
 	ing, err := s.Ingest(context.Background(), "did:plc:x", base+"/v.mp4")
@@ -141,7 +141,7 @@ func TestIngestVideo(t *testing.T) {
 func TestIngestRejectsUnsupportedAndOversized(t *testing.T) {
 	s, o, base := newTestService(t)
 	o.set("/v.webm", "video/webm", []byte("xx"))
-	o.set("/big.png", "image/png", bytes.Repeat([]byte{1}, MaxImageSize+1))
+	o.set("/big.png", "image/png", bytes.Repeat([]byte{1}, DefaultImageMaxBytes+1))
 	o.set("/missing-ct.bin", "", []byte("plain text, no header"))
 
 	if _, err := s.Ingest(context.Background(), "did:plc:x", base+"/v.webm"); !errors.Is(err, ErrUnsupportedMedia) {
@@ -450,4 +450,221 @@ func mustRead(t *testing.T, p string) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// --- image re-encoding (skipped without ffmpeg) ---
+
+func TestLimitFor(t *testing.T) {
+	s, _, _ := newTestService(t)
+	for mime, want := range map[string]struct {
+		limit int64
+		ok    bool
+	}{
+		"video/mp4":  {MaxVideoSize, true},
+		"video/webm": {0, false},
+		"image/png":  {DefaultImageMaxBytes, true},
+		"image/heic": {0, false},
+		"text/plain": {0, false},
+	} {
+		if limit, ok := s.limitFor(mime); limit != want.limit || ok != want.ok {
+			t.Errorf("no tc: limitFor(%s) = %d,%v want %d,%v", mime, limit, ok, want.limit, want.ok)
+		}
+	}
+	s, _, _ = newTranscodingService(t)
+	for mime, want := range map[string]struct {
+		limit int64
+		ok    bool
+	}{
+		"video/mp4":  {MaxVideoSize, true},
+		"video/webm": {MaxVideoSize, true},
+		"image/png":  {DefaultImageSourceMaxBytes, true},
+		"image/heic": {DefaultImageSourceMaxBytes, true},
+		"text/plain": {0, false},
+	} {
+		if limit, ok := s.limitFor(mime); limit != want.limit || ok != want.ok {
+			t.Errorf("tc: limitFor(%s) = %d,%v want %d,%v", mime, limit, ok, want.limit, want.ok)
+		}
+	}
+}
+
+func TestIngestReencodesImage(t *testing.T) {
+	s, o, base := newTranscodingService(t)
+	src := mediatest.ImageFixture(t, "mjpeg", 3000, 2000)
+	o.set("/photo.jpg", "image/jpeg", src)
+
+	ing, err := s.Ingest(context.Background(), "did:plc:x", base+"/photo.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ing.Blob.MimeType != "image/jpeg" || ing.Width != 2000 || ing.Height != 1333 {
+		t.Fatalf("ingested = %+v", ing)
+	}
+	if ing.Blob.Size > DefaultImageMaxBytes {
+		t.Fatalf("size = %d over the cap", ing.Blob.Size)
+	}
+	cidStr := ing.Blob.Ref.String()
+	stored := mustRead(t, s.path("did:plc:x", cidStr))
+	if bytes.Equal(stored, src) {
+		t.Fatal("stored file is the untouched source")
+	}
+	if int64(len(stored)) != ing.Blob.Size {
+		t.Fatalf("size = %d, file is %d", ing.Blob.Size, len(stored))
+	}
+	entries, _ := os.ReadDir(filepath.Join(s.dataDir, "did:plc:x"))
+	if len(entries) != 1 {
+		t.Fatalf("temp files left behind: %d entries", len(entries))
+	}
+	var rec store.Blob
+	if err := s.db.First(&rec, "did = ? AND cid = ?", "did:plc:x", cidStr).Error; err != nil {
+		t.Fatal(err)
+	}
+	if rec.Mime != "image/jpeg" || rec.Size != ing.Blob.Size || rec.SrcURL != base+"/photo.jpg" {
+		t.Fatalf("row = %+v", rec)
+	}
+}
+
+func TestIngestStripsEXIFAndAppliesOrientation(t *testing.T) {
+	s, o, base := newTranscodingService(t)
+	src := mediatest.WithEXIFOrientation(t, mediatest.ImageFixture(t, "mjpeg", 400, 300), 6, "MM")
+	o.set("/rot.jpg", "image/jpeg", src)
+
+	ing, err := s.Ingest(context.Background(), "did:plc:x", base+"/rot.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ing.Width != 300 || ing.Height != 400 {
+		t.Fatalf("dimensions = %dx%d, want 300x400", ing.Width, ing.Height)
+	}
+	if bytes.Contains(mustRead(t, s.path("did:plc:x", ing.Blob.Ref.String())), []byte("Exif\x00\x00")) {
+		t.Fatal("EXIF survived re-encoding")
+	}
+}
+
+func TestIngestAcceptsAnyImageWithTranscoder(t *testing.T) {
+	s, o, base := newTranscodingService(t)
+	o.set("/pic.bmp", "image/bmp", mediatest.ImageFixture(t, "bmp", 200, 100))
+	ing, err := s.Ingest(context.Background(), "did:plc:x", base+"/pic.bmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ing.Blob.MimeType != "image/jpeg" || ing.Width != 200 || ing.Height != 100 {
+		t.Fatalf("ingested = %+v", ing)
+	}
+}
+
+func TestIngestAlphaImageBecomesPNG(t *testing.T) {
+	s, o, base := newTranscodingService(t)
+	o.set("/a.png", "image/png", mediatest.RGBAPNG(t, 320, 240))
+	ing, err := s.Ingest(context.Background(), "did:plc:x", base+"/a.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ing.Blob.MimeType != "image/png" {
+		t.Fatalf("mime = %q", ing.Blob.MimeType)
+	}
+}
+
+func TestIngestAnimatedGIF(t *testing.T) {
+	s, o, base := newTranscodingService(t)
+	gif := mediatest.AnimatedGIF(t, 5, 120, 90)
+	o.set("/a.gif", "image/gif", gif)
+
+	ing, err := s.Ingest(context.Background(), "did:plc:x", base+"/a.gif")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ing.Blob.MimeType != "image/gif" || !bytes.Equal(gif, mustRead(t, s.path("did:plc:x", ing.Blob.Ref.String()))) {
+		t.Fatal("small animated gif was not passed through")
+	}
+	if ing.Width != 120 || ing.Height != 90 {
+		t.Fatalf("dimensions = %dx%d", ing.Width, ing.Height)
+	}
+
+	s.imageMaxBytes = int64(len(gif)) - 1
+	ing, err = s.Ingest(context.Background(), "did:plc:y", base+"/a.gif")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ing.Blob.MimeType != "image/jpeg" || ing.Blob.Size > s.imageMaxBytes {
+		t.Fatalf("oversize gif ingested = %+v", ing)
+	}
+}
+
+func TestIngestOversizeSourceRejected(t *testing.T) {
+	s, o, base := newTranscodingService(t)
+	s.imageSourceMaxBytes = 1024
+	o.set("/big.jpg", "image/jpeg", mediatest.ImageFixture(t, "mjpeg", 640, 480))
+	if _, err := s.Ingest(context.Background(), "did:plc:x", base+"/big.jpg"); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("err = %v, want ErrTooLarge", err)
+	}
+}
+
+func TestIngestUncompressibleImageRejected(t *testing.T) {
+	s, o, base := newTranscodingService(t)
+	s.imageMaxBytes = 500
+	o.set("/noise.png", "image/png", mediatest.NoisyPNG(t, 400, 300))
+	_, err := s.Ingest(context.Background(), "did:plc:x", base+"/noise.png")
+	if !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("err = %v, want ErrTooLarge", err)
+	}
+	entries, _ := os.ReadDir(filepath.Join(s.dataDir, "did:plc:x"))
+	if len(entries) != 0 {
+		t.Fatalf("temp files left behind: %d entries", len(entries))
+	}
+}
+
+func TestIngestRejectsUndecodableImage(t *testing.T) {
+	s, o, base := newTranscodingService(t)
+	o.set("/bad.jpg", "image/jpeg", []byte("definitely not a jpeg"))
+	if _, err := s.Ingest(context.Background(), "did:plc:x", base+"/bad.jpg"); err == nil {
+		t.Fatal("expected error")
+	}
+	entries, _ := os.ReadDir(filepath.Join(s.dataDir, "did:plc:x"))
+	if len(entries) != 0 {
+		t.Fatalf("temp files left behind: %d entries", len(entries))
+	}
+}
+
+func TestIngestPassthroughImageWithoutTranscoderEnforcesCap(t *testing.T) {
+	s, o, base := newTestService(t)
+	s.imageMaxBytes = 100
+	o.set("/ok.png", "image/png", pngHeader)
+	o.set("/big.png", "image/png", bytes.Repeat([]byte{1}, 101))
+	if _, err := s.Ingest(context.Background(), "did:plc:x", base+"/ok.png"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Ingest(context.Background(), "did:plc:x", base+"/big.png"); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("err = %v, want ErrTooLarge", err)
+	}
+	if _, err := s.Ingest(context.Background(), "did:plc:x", base+"/x.heic"); err == nil {
+		t.Fatal("expected error for heic without ffmpeg")
+	}
+}
+
+func TestOpenRestoresReencodedImage(t *testing.T) {
+	s, o, base := newTranscodingService(t)
+	o.set("/photo.jpg", "image/jpeg", mediatest.ImageFixture(t, "mjpeg", 3000, 2000))
+	ing, err := s.Ingest(context.Background(), "did:plc:x", base+"/photo.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cidStr := ing.Blob.Ref.String()
+	want := mustRead(t, s.path("did:plc:x", cidStr))
+	if err := os.Remove(s.path("did:plc:x", cidStr)); err != nil {
+		t.Fatal(err)
+	}
+	o.hits.Store(0)
+
+	rec, r, err := s.Open(context.Background(), "did:plc:x", cidStr)
+	if err != nil {
+		t.Fatalf("restore via re-encode failed: %v", err)
+	}
+	defer r.Close()
+	got, _ := io.ReadAll(r)
+	if rec.Mime != "image/jpeg" || !bytes.Equal(got, want) {
+		t.Fatal("restored blob differs from original re-encode")
+	}
+	if o.hits.Load() != 1 {
+		t.Fatalf("origin hits = %d, want 1", o.hits.Load())
+	}
 }

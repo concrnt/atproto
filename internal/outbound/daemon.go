@@ -427,7 +427,7 @@ func (d *Daemon) exportMessage(ctx context.Context, entity *store.Entity, cckv s
 	type imgSrc struct{ url, alt string }
 	var sources []imgSrc
 	for _, m := range value.Medias {
-		if strings.HasPrefix(m.MediaType, "image/") {
+		if blobs.IsImage(m.MediaType) {
 			sources = append(sources, imgSrc{url: m.MediaURL})
 		}
 	}
@@ -443,10 +443,7 @@ func (d *Daemon) exportMessage(ctx context.Context, entity *store.Entity, cckv s
 			slog.Warn("failed to ingest image", "url", src.url, "error", err)
 			continue
 		}
-		opts.Images = append(opts.Images, &appbsky.EmbedImages_Image{
-			Image: ing.Blob,
-			Alt:   src.alt,
-		})
+		opts.Images = append(opts.Images, imageEmbed(ing, src.alt))
 	}
 
 	tobsky.EnforceLimit(&parts)
@@ -591,6 +588,17 @@ func (d *Daemon) SyncProfile(ctx context.Context, entity *store.Entity) error {
 
 	_, _, err = d.repos.PutRecord(ctx, entity.DID, "app.bsky.actor.profile", "self", profile)
 	return err
+}
+
+// imageEmbed builds one embed.images entry from an ingested blob, carrying
+// the display aspect ratio when the ingest pipeline probed it (clients use it
+// to reserve layout before the image loads).
+func imageEmbed(ing *blobs.Ingested, alt string) *appbsky.EmbedImages_Image {
+	img := &appbsky.EmbedImages_Image{Image: ing.Blob, Alt: alt}
+	if ing.Width > 0 && ing.Height > 0 {
+		img.AspectRatio = &appbsky.EmbedDefs_AspectRatio{Width: int64(ing.Width), Height: int64(ing.Height)}
+	}
+	return img
 }
 
 // handleFollowEvent processes follow documents in the user's cckv space

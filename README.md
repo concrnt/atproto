@@ -60,7 +60,7 @@ concrnt (v2) と Bluesky / atproto を双方向に接続するブリッジです
 | concrnt | Bluesky |
 |---|---|
 | m/markdown, gfm, plaintext | `app.bsky.feed.post`(plaintext化 + link/tag facets) |
-| m/media.json(画像) | post + `embed.images`(≦4枚、事前取り込みblob) |
+| m/media.json(画像) | post + `embed.images`(≦4枚、事前取り込みblob。ffmpeg で JPEG(透過元は PNG)へ再エンコード: EXIF/GPS 除去・向き補正・長辺 2000px・1,000,000 bytes 以下。HEIC/AVIF 等も受け付け・aspectRatio 付き) |
 | m/media.json(動画) | post + `embed.video`(mp4 1本・≦100MB、事前取り込みblob。動画があれば画像は落とす) |
 | m/reply.json | post + `reply{root, parent}` |
 | m/reroute.json(本文なし) | `app.bsky.feed.repost` |
@@ -143,13 +143,18 @@ value:  {"listenTimelines": ["cckv://..."], "enabled": true}
 - 永続ボリューム(`dataDir`: carstore / blobs / firehoseイベントログ)
   - blobs はキャッシュ扱い。ファイルを失っても取り込み元 URL(`at_blobs.src_url`)から
     再取得して復元します(元コンテンツが不変である前提。ハッシュ不一致なら配信しません)
-  - ただしトランスコード済み動画は ffmpeg の出力そのものが blob なので、ffmpeg を更新した後に
-    ファイルを失うと再生成結果のハッシュが合わず復元できないことがあります
+  - ただしトランスコード済み動画・再エンコード済み画像は ffmpeg の出力そのものが blob なので、
+    ffmpeg を更新した後にファイルを失うと再生成結果のハッシュが合わず復元できないことがあります
 - ffmpeg / ffprobe(任意)。Bluesky の動画 blob は H.264/AAC の mp4 限定なので、
   それ以外の動画(webm / mov / HEVC mp4 等)はブリッジが ffmpeg で変換してから保存します。
+  画像も全て ffmpeg で再エンコードします(JPEG、透過元は PNG。EXIF/GPS 除去・向き補正・
+  長辺 `imageMaxDimension`(既定 2000px)・`imageMaxBytes`(既定 1,000,000 bytes)以下になるまで
+  品質→寸法の順に段階圧縮。HEIC/AVIF 等 ffmpeg が読める形式は全て受け付け。アニメ GIF は
+  上限以下なら無加工、超えたら先頭フレームを JPEG 化)。公式クライアントは上限超えの画像を含む
+  投稿をフィードから黙って落とすため、この上限は必ず守る必要があります。
   Docker イメージには静的ビルドを同梱済み。バイナリ直実行の場合は PATH に置くか
-  `atproto.media.ffmpegPath` / `ffprobePath` で指定してください。無い場合は従来通り
-  mp4 のみ受け付け(無検査)で動きます
+  `atproto.media.ffmpegPath` / `ffprobePath` で指定してください。無い場合は
+  mp4 と jpeg/png/webp/gif/avif のみ受け付け(`imageMaxBytes` 超えの画像は落とす・他は無検査)で動きます
 - **専用ドメインは不要**。全経路(公開 PDS `/xrpc` 含む)を concrnt ゲートウェイ
   経由でプロキシします。PDS の serviceEndpoint は concrnt サーバーの FQDN
   そのものになるため、ワイルドカード DNS/TLS も要りません。

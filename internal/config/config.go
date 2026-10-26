@@ -69,14 +69,23 @@ type Atproto struct {
 	Media                    Media  `yaml:"media"`
 }
 
-// Media configures video transcoding on blob ingest. ffmpeg/ffprobe are
-// looked up on PATH by default; when either is missing transcoding is
-// disabled and only video/mp4 is accepted, unchecked.
+// Media configures ffmpeg processing on blob ingest: videos are transcoded
+// to H.264/AAC mp4, images re-encoded to size-capped JPEG/PNG with metadata
+// stripped. ffmpeg/ffprobe are looked up on PATH by default; when either is
+// missing (or DisableTranscode is set) only video/mp4 and the natively
+// supported image types are accepted, unchecked apart from the image cap.
 type Media struct {
 	FFmpegPath              string `yaml:"ffmpegPath"`
 	FFprobePath             string `yaml:"ffprobePath"`
 	DisableTranscode        bool   `yaml:"disableTranscode"`
 	TranscodeTimeoutSeconds int    `yaml:"transcodeTimeoutSeconds"`
+	// ImageMaxBytes caps image blobs. 1,000,000 is the official app's target
+	// and the historical limit; app.bsky.embed.images allows 2,000,000 today.
+	ImageMaxBytes int64 `yaml:"imageMaxBytes"`
+	// ImageMaxDimension caps the long side of re-encoded images in pixels.
+	ImageMaxDimension int `yaml:"imageMaxDimension"`
+	// ImageSourceMaxBytes caps image downloads when ffmpeg re-encodes them.
+	ImageSourceMaxBytes int64 `yaml:"imageSourceMaxBytes"`
 }
 
 type Config struct {
@@ -158,6 +167,15 @@ func Load(path string) (*Config, error) {
 	}
 	if c.Atproto.Media.TranscodeTimeoutSeconds == 0 {
 		c.Atproto.Media.TranscodeTimeoutSeconds = 600
+	}
+	if c.Atproto.Media.ImageMaxBytes == 0 {
+		c.Atproto.Media.ImageMaxBytes = 1_000_000
+	}
+	if c.Atproto.Media.ImageMaxDimension == 0 {
+		c.Atproto.Media.ImageMaxDimension = 2000
+	}
+	if c.Atproto.Media.ImageSourceMaxBytes == 0 {
+		c.Atproto.Media.ImageSourceMaxBytes = 20 << 20
 	}
 
 	if c.Concrnt.CCID == "" || c.Concrnt.Domain == "" || c.Concrnt.PrivateKey == "" {

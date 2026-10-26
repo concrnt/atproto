@@ -16,11 +16,13 @@ import (
 	"testing"
 	"time"
 
+	lexutil "github.com/bluesky-social/indigo/lex/util"
 	concrnt "github.com/concrnt/concrnt"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 
+	"github.com/concrnt/atproto/internal/blobs"
 	"github.com/concrnt/atproto/internal/core"
 	"github.com/concrnt/atproto/internal/store"
 	"github.com/concrnt/atproto/internal/world"
@@ -132,5 +134,19 @@ func TestHandleTimelineEventNonPublicNested(t *testing.T) {
 	d.db.Model(&store.URIMap{}).Count(&count)
 	if count != 0 {
 		t.Errorf("non-public nested document was mirrored (%d URIMap rows)", count)
+	}
+}
+
+func TestImageEmbedAspectRatio(t *testing.T) {
+	blob := &lexutil.LexBlob{MimeType: "image/jpeg", Size: 10}
+	img := imageEmbed(&blobs.Ingested{Blob: blob, Width: 2000, Height: 1333}, "alt text")
+	if img.Image != blob || img.Alt != "alt text" {
+		t.Fatalf("embed = %+v", img)
+	}
+	if img.AspectRatio == nil || img.AspectRatio.Width != 2000 || img.AspectRatio.Height != 1333 {
+		t.Fatalf("aspect ratio = %+v", img.AspectRatio)
+	}
+	if got := imageEmbed(&blobs.Ingested{Blob: blob}, ""); got.AspectRatio != nil {
+		t.Fatalf("aspect ratio without dimensions = %+v", got.AspectRatio)
 	}
 }

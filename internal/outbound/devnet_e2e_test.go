@@ -111,7 +111,7 @@ func TestDevnetOutboundPath(t *testing.T) {
 	} else {
 		t.Logf("ffmpeg unavailable, transcoding steps skipped: %v", err)
 	}
-	blobSvc := blobs.NewService(db, blobDir, tc)
+	blobSvc := blobs.NewService(db, blobDir, tc, blobs.Options{})
 	daemon := outbound.NewDaemon(db, coreSvc, repos, blobSvc, "", time.Second)
 	go daemon.Run(ctx, events)
 	time.Sleep(500 * time.Millisecond) // let the daemon load entities
@@ -238,6 +238,7 @@ func TestDevnetOutboundPath(t *testing.T) {
 
 	if tc != nil {
 		testDevnetTranscodedVideo(ctx, t, db, repos, blobSvc, coreSvc, blobDir, ccid, did, home)
+		testDevnetReencodedImage(ctx, t, db, repos, blobSvc, coreSvc, blobDir, ccid, did, home)
 	}
 
 	// Cleanup on the devnet side.
@@ -351,6 +352,92 @@ func testDevnetTranscodedVideo(ctx context.Context, t *testing.T, db *gorm.DB, r
 	r.Close()
 	if !bytes.Equal(restored, stored) {
 		t.Error("re-transcoded blob differs from the original transcode")
+	}
+	if hits != 2 {
+		t.Errorf("media origin hits = %d, want 2 (ingest + restore)", hits)
+	}
+}
+
+// testDevnetReencodedImage posts a 3000x2000 JPEG: the daemon must re-encode
+// it under the image cap (2000x1333 JPEG), record aspectRatio, and be able
+// to rebuild the blob by re-encoding after file loss.
+func testDevnetReencodedImage(ctx context.Context, t *testing.T, db *gorm.DB, repos *repoman.Manager,
+	blobSvc *blobs.Service, coreSvc *core.Service, blobDir, ccid, did, home string) {
+	t.Helper()
+	jpg := mediatest.ImageFixture(t, "mjpeg", 3000, 2000)
+	var hits int
+	media := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write(jpg)
+	}))
+	defer media.Close()
+
+	key := fmt.Sprintf("cckv://%s/e2etest/%d", ccid, time.Now().UnixNano())
+	doc := concrnt.Document[world.MessageValue]{
+		Kind: "record", Key: key, Schema: world.SchemaMarkdown,
+		Value: world.MessageValue{
+			Body:   "outbound e2e re-encoded image post",
+			Medias: []world.Media{{MediaURL: media.URL + "/photo.jpg", MediaType: "image/jpeg"}},
+		},
+		Author: ccid, CreatedAt: time.Now().UTC(), Distributes: &[]string{home},
+	}
+	if _, err := core.Commit(ctx, coreSvc, doc); err != nil {
+		t.Fatalf("image post commit failed: %v", err)
+	}
+	var m store.URIMap
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if err := db.Where("cc_uri = ? AND ref_type = ?", key, "outbound-post").First(&m).Error; err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the daemon to export the image post")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	defer func() {
+		if _, err := core.Commit(ctx, coreSvc, concrnt.Document[string]{
+			Kind: "delete", Schema: world.SchemaDelete, Value: key,
+			Author: ccid, CreatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Logf("image cleanup delete failed: %v", err)
+		}
+	}()
+
+	rec, err := repos.GetRecordJSON(ctx, did, m.Collection, m.Rkey)
+	if err != nil {
+		t.Fatalf("image record not readable: %v", err)
+	}
+	for _, want := range []string{`"app.bsky.embed.images"`, `"image/jpeg"`, `"aspectRatio"`, `"width":2000`, `"height":1333`} {
+		if !strings.Contains(string(rec), want) {
+			t.Errorf("re-encoded record lacks %s: %s", want, rec)
+		}
+	}
+
+	var row store.Blob
+	if err := db.Where("did = ? AND src_url = ?", did, media.URL+"/photo.jpg").First(&row).Error; err != nil {
+		t.Fatalf("re-encoded blob row missing: %v", err)
+	}
+	if row.Mime != "image/jpeg" || row.Size == int64(len(jpg)) || row.Size > blobs.DefaultImageMaxBytes {
+		t.Errorf("blob row = %+v (source was %d bytes)", row, len(jpg))
+	}
+	path := filepath.Join(blobDir, "blobs", did, row.CID)
+	stored, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	_, r, err := blobSvc.Open(ctx, did, row.CID)
+	if err != nil {
+		t.Fatalf("re-encoded blob not restored after file loss: %v", err)
+	}
+	restored, _ := io.ReadAll(r)
+	r.Close()
+	if !bytes.Equal(restored, stored) {
+		t.Error("re-encoded blob differs from the original encode")
 	}
 	if hits != 2 {
 		t.Errorf("media origin hits = %d, want 2 (ingest + restore)", hits)

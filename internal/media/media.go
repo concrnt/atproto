@@ -4,9 +4,12 @@
 // no audio), and the official app gets there by transcoding server side. The
 // bridge writes records straight to its own PDS, so it has to do the same
 // itself; anything that is not already in that shape goes through ffmpeg.
+// Images are re-encoded too (see image.go): size-capped JPEG/PNG with EXIF
+// stripped and orientation applied, the way the official app uploads them.
 //
 // Both tools are optional at runtime. When they are missing the bridge keeps
-// its old behaviour: only video/mp4 is accepted, unchecked.
+// its old behaviour: only video/mp4 and a few image types are accepted,
+// unchecked apart from the size cap.
 package media
 
 import (
@@ -27,6 +30,7 @@ type Transcoder struct {
 	ffmpeg  string
 	ffprobe string
 	timeout time.Duration
+	alphaState
 }
 
 // New resolves the two binaries (names are looked up on PATH; absolute paths
@@ -77,35 +81,54 @@ type Info struct {
 // ErrNoVideoStream is returned by Probe for files without a video stream.
 var ErrNoVideoStream = errors.New("no video stream")
 
+type probeStream struct {
+	CodecType     string `json:"codec_type"`
+	CodecName     string `json:"codec_name"`
+	PixFmt        string `json:"pix_fmt"`
+	Width         int    `json:"width"`
+	Height        int    `json:"height"`
+	NbReadPackets string `json:"nb_read_packets"`
+	Tags          struct {
+		Rotate string `json:"rotate"`
+	} `json:"tags"`
+	SideDataList []struct {
+		Rotation json.Number `json:"rotation"`
+	} `json:"side_data_list"`
+}
+
+// rotation returns the stream's display rotation in degrees from the rotate
+// tag or display-matrix side data (side data wins), 0 when absent.
+func (s probeStream) rotation() float64 {
+	rot := 0.0
+	if s.Tags.Rotate != "" {
+		rot, _ = strconv.ParseFloat(s.Tags.Rotate, 64)
+	}
+	for _, sd := range s.SideDataList {
+		if sd.Rotation != "" {
+			if r, err := sd.Rotation.Float64(); err == nil {
+				rot = r
+			}
+		}
+	}
+	return rot
+}
+
 type probeOutput struct {
-	Streams []struct {
-		CodecType string `json:"codec_type"`
-		CodecName string `json:"codec_name"`
-		PixFmt    string `json:"pix_fmt"`
-		Width     int    `json:"width"`
-		Height    int    `json:"height"`
-		Tags      struct {
-			Rotate string `json:"rotate"`
-		} `json:"tags"`
-		SideDataList []struct {
-			Rotation json.Number `json:"rotation"`
-		} `json:"side_data_list"`
-	} `json:"streams"`
-	Format struct {
+	Streams []probeStream `json:"streams"`
+	Format  struct {
 		Duration string `json:"duration"`
 	} `json:"format"`
 }
 
-// Probe inspects path with ffprobe.
-func (t *Transcoder) Probe(ctx context.Context, path string) (*Info, error) {
+// runProbe runs ffprobe on path with -show_streams -show_format plus extra
+// flags and parses the JSON.
+func (t *Transcoder) runProbe(ctx context.Context, path string, extra ...string) (*probeOutput, error) {
 	ctx, cancel := context.WithTimeout(ctx, t.timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, t.ffprobe,
-		"-v", "error",
-		"-print_format", "json",
-		"-show_streams", "-show_format",
-		path,
-	)
+	args := []string{"-v", "error", "-print_format", "json", "-show_streams", "-show_format"}
+	args = append(args, extra...)
+	args = append(args, path)
+	cmd := exec.CommandContext(ctx, t.ffprobe, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -115,6 +138,15 @@ func (t *Transcoder) Probe(ctx context.Context, path string) (*Info, error) {
 	var po probeOutput
 	if err := json.Unmarshal(out, &po); err != nil {
 		return nil, fmt.Errorf("ffprobe output unreadable: %w", err)
+	}
+	return &po, nil
+}
+
+// Probe inspects path with ffprobe.
+func (t *Transcoder) Probe(ctx context.Context, path string) (*Info, error) {
+	po, err := t.runProbe(ctx, path)
+	if err != nil {
+		return nil, err
 	}
 
 	info := &Info{}
@@ -132,18 +164,7 @@ func (t *Transcoder) Probe(ctx context.Context, path string) (*Info, error) {
 			info.VideoCodec = s.CodecName
 			info.PixFmt = s.PixFmt
 			info.Width, info.Height = s.Width, s.Height
-			rot := 0.0
-			if s.Tags.Rotate != "" {
-				rot, _ = strconv.ParseFloat(s.Tags.Rotate, 64)
-			}
-			for _, sd := range s.SideDataList {
-				if sd.Rotation != "" {
-					if r, err := sd.Rotation.Float64(); err == nil {
-						rot = r
-					}
-				}
-			}
-			if r := int(rot) % 180; r == 90 || r == -90 {
+			if r := int(s.rotation()) % 180; r == 90 || r == -90 {
 				info.Width, info.Height = info.Height, info.Width
 			}
 		case "audio":

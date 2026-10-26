@@ -101,7 +101,7 @@ func newDevnetHarness(t *testing.T, did string) *devnetHarness {
 		db:       db,
 		repos:    repos,
 		core:     core.NewService(ccid, devnetURL, privkey),
-		blobs:    blobs.NewService(db, t.TempDir(), nil),
+		blobs:    blobs.NewService(db, t.TempDir(), nil, blobs.Options{}),
 	}
 }
 

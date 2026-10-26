@@ -45,11 +45,18 @@ atproto:
   # actorCacheTtlMinutes: 60
   # entityReloadIntervalSeconds: 60
   # disableRelayNotify: false
-  # Video transcoding on ingest. ffmpeg/ffprobe are looked up on PATH (the
+  # Media processing on ingest. ffmpeg/ffprobe are looked up on PATH (the
   # Docker image bundles static builds). Videos that are not already an
-  # H.264/AAC mp4 are re-encoded; without ffmpeg only video/mp4 is accepted.
+  # H.264/AAC mp4 are re-encoded. Images (any image/* ffmpeg can decode,
+  # HEIC included) are re-encoded to JPEG (PNG when transparent) with EXIF
+  # stripped, orientation applied, the long side capped at imageMaxDimension
+  # and the file compressed under imageMaxBytes. Without ffmpeg only
+  # video/mp4 and jpeg/png/webp/gif/avif up to imageMaxBytes pass through.
   # media:
   #   ffmpegPath: ffmpeg
   #   ffprobePath: ffprobe
   #   disableTranscode: false
   #   transcodeTimeoutSeconds: 600
+  #   imageMaxBytes: 1000000        # bsky's historical/official-PDS image cap (lexicon now allows 2000000)
+  #   imageMaxDimension: 2000       # long side in px, same as the official app
+  #   imageSourceMaxBytes: 20971520 # 20MB download cap for images that will be re-encoded
