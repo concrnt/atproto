@@ -258,3 +258,102 @@ func TestAnnounceRequiresActiveAccount(t *testing.T) {
 		t.Fatalf("event order %v", kinds)
 	}
 }
+
+func TestSetupChangesPendingHandle(t *testing.T) {
+	srv, fr, db := setupServer(t)
+	e := echo.New()
+	srv.Register(e)
+
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, authedReq(http.MethodPost, "/atproto/api/setup", `{"handle":"alice.example.com"}`, "con1alice"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("setup status %d: %s", rec.Code, rec.Body)
+	}
+	var first store.Entity
+	db.Where("ccid = ?", "con1alice").First(&first)
+
+	// Same handle again → idempotent, nothing moves.
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, authedReq(http.MethodPost, "/atproto/api/setup", `{"handle":"Alice.example.com"}`, "con1alice"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("re-setup with same handle status %d: %s", rec.Code, rec.Body)
+	}
+	var same store.Entity
+	db.Where("ccid = ?", "con1alice").First(&same)
+	if same.PLCLastOpCID != first.PLCLastOpCID || same.Handle != "alice.example.com" {
+		t.Fatalf("same-handle re-setup should not change the row: %+v vs %+v", same, first)
+	}
+
+	// Another user cannot take the pending handle.
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, authedReq(http.MethodPost, "/atproto/api/setup", `{"handle":"alice.example.com"}`, "con1mallory"))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("pending handle should stay reserved, got %d: %s", rec.Code, rec.Body)
+	}
+
+	// New handle while pending → same DID, new PLC op, row updated.
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, authedReq(http.MethodPost, "/atproto/api/setup", `{"handle":"bob.example.com"}`, "con1alice"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("change-handle status %d: %s", rec.Code, rec.Body)
+	}
+	var resp struct {
+		DID          string `json:"did"`
+		Handle       string `json:"handle"`
+		Status       string `json:"status"`
+		Verification struct {
+			DNS struct{ Name, Value string } `json:"dns"`
+		} `json:"verification"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.DID != first.DID || resp.Handle != "bob.example.com" || resp.Status != "pending" {
+		t.Fatalf("unexpected change-handle resp %+v", resp)
+	}
+	if resp.Verification.DNS.Name != "_atproto.bob.example.com" || resp.Verification.DNS.Value != "did="+first.DID {
+		t.Fatalf("verification records not rebuilt for the new handle: %+v", resp.Verification)
+	}
+	var changed store.Entity
+	db.Where("ccid = ?", "con1alice").First(&changed)
+	if changed.DID != first.DID {
+		t.Fatal("did must not change when the handle changes")
+	}
+	if changed.Handle != "bob.example.com" || changed.PLCLastOpCID == first.PLCLastOpCID || changed.PLCLastOpCID == "" {
+		t.Fatalf("row not updated: %+v", changed)
+	}
+	var count int64
+	db.Model(&store.Entity{}).Where("ccid = ?", "con1alice").Count(&count)
+	if count != 1 {
+		t.Fatalf("expected a single row, got %d", count)
+	}
+
+	// The old handle is free again, the new one is reserved.
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, authedReq(http.MethodPost, "/atproto/api/setup", `{"handle":"bob.example.com"}`, "con1mallory"))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("new pending handle should be reserved, got %d: %s", rec.Code, rec.Body)
+	}
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, authedReq(http.MethodPost, "/atproto/api/setup", `{"handle":"alice.example.com"}`, "con1mallory"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("released handle should be takeable, got %d: %s", rec.Code, rec.Body)
+	}
+
+	// Verify against the new handle activates with the original DID.
+	fr.table["bob.example.com"] = first.DID
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, authedReq(http.MethodPost, "/atproto/api/verify", ``, "con1alice"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("verify status %d: %s", rec.Code, rec.Body)
+	}
+	db.Where("ccid = ?", "con1alice").First(&changed)
+	if changed.Status != "active" || changed.Handle != "bob.example.com" {
+		t.Fatalf("expected active bob, got %+v", changed)
+	}
+
+	// Once active the handle is fixed.
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, authedReq(http.MethodPost, "/atproto/api/setup", `{"handle":"carol.example.com"}`, "con1alice"))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("setup on an active account should 409, got %d: %s", rec.Code, rec.Body)
+	}
+}

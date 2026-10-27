@@ -283,6 +283,8 @@ func (s *Server) handleRevokeAppPassword(c echo.Context) error {
 // domain ownership (a `_atproto.<handle>` DNS TXT record pointing at the DID,
 // or an HTTPS well-known) before /atproto/api/verify activates it. No repo,
 // firehose event, or relay crawl happens until then.
+// While still pending, calling it again with another handle swaps the
+// claimed domain on the same DID (so the DNS value stays valid).
 func (s *Server) handleSetup(c echo.Context) error {
 	ccid := requester(c)
 	if ccid == "" {
@@ -303,15 +305,31 @@ func (s *Server) handleSetup(c echo.Context) error {
 		})
 	}
 
-	var count int64
-	s.db.Model(&store.Entity{}).Where("handle = ?", handle).Count(&count)
-	if count > 0 {
-		return c.JSON(http.StatusConflict, map[string]string{"error": "handle already taken"})
+	var own store.Entity
+	hasOwn := s.db.Where("ccid = ?", ccid).First(&own).Error == nil
+	if hasOwn && own.Status != "pending" {
+		return c.JSON(http.StatusConflict, map[string]string{"error": "account is already active"})
 	}
 
-	ent, err := s.repos.CreatePending(c.Request().Context(), ccid, handle)
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	var ent *store.Entity
+	if hasOwn && own.Handle == handle {
+		ent = &own
+	} else {
+		var count int64
+		s.db.Model(&store.Entity{}).Where("handle = ?", handle).Count(&count)
+		if count > 0 {
+			return c.JSON(http.StatusConflict, map[string]string{"error": "handle already taken"})
+		}
+		var err error
+		if hasOwn {
+			// Still unverified: re-point the same DID at the new domain.
+			ent, err = s.repos.ChangePendingHandle(c.Request().Context(), own.DID, handle)
+		} else {
+			ent, err = s.repos.CreatePending(c.Request().Context(), ccid, handle)
+		}
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{

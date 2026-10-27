@@ -87,6 +87,9 @@ DID発行前にDNSレコードは書けないため、登録は2段階です:
    - または HTTPS: ユーザー自身のWebサーバーで
      `https://alice.example.com/.well-known/atproto-did` が DID を plain text で
      返すようにする(ブリッジ側の関与はありません)
+   ドメインを間違えた場合は、pending のうちに別の handle で `setup` を再 POST
+   すると同じ DID のまま差し替わります(PLC に alsoKnownAs を更新する op を
+   出すだけで、DID も DNS TXT の値も変わりません)。
 2. ユーザーが上記いずれかを設定 → `POST /atproto/api/verify` → ハンドルが
    その DID に解決できることを確認し、成功時にアカウントを active 化
    (repo 初期化 → #identity → #account → プロフィール同期 → requestCrawl)。
@@ -227,7 +230,7 @@ volume で同じディレクトリに重ねる想定です(concrnt 本体・Acti
 
 | エンドポイント | 説明 |
 |---|---|
-| `POST /atproto/api/setup {handle}` | 登録1段階目: 持ち込みドメインで did:plc 発番、status=pending。検証手順を返す |
+| `POST /atproto/api/setup {handle}` | 登録1段階目: 持ち込みドメインで did:plc 発番、status=pending。検証手順を返す。pending 中に別の handle で再 POST すると同じ DID のまま差し替え(PLC update op)。active 後は 409 |
 | `POST /atproto/api/verify` | 登録2段階目: handle の DNS/well-known 検証成功で active 化(relay へ requestCrawl → repo 初期化) |
 | `POST /atproto/api/announce` | 自分の `#identity`/`#account` を firehose に再送し、requestCrawl と concrnt プロフィールの repo への同期(新しい #commit)もやり直す。appview が `handle.invalid` を表示している(DNS 反映前に検証された)時、relay が activation を取りこぼした時、プロフィールが Bluesky 側に反映されない時に使う |
 | `GET /atproto/api/info` | ブリッジ情報 + 自分のエンティティ状態 + `login:{service,identifier}`(公式アプリのログイン画面に入れる値) |

@@ -339,6 +339,39 @@ func (m *Manager) CreatePending(ctx context.Context, ccid, handle string) (*stor
 	return &ent, nil
 }
 
+// ChangePendingHandle swaps the handle a still-unverified account claims:
+// a PLC update op replacing alsoKnownAs on the same DID, then the row. The
+// DID (and so the DNS TXT value) is unchanged, and nothing has reached the
+// network yet, so there is nothing else to undo.
+func (m *Manager) ChangePendingHandle(ctx context.Context, did, newHandle string) (*store.Entity, error) {
+	ent, err := m.entityByDID(did)
+	if err != nil {
+		return nil, err
+	}
+	if ent.Status != "pending" {
+		return nil, fmt.Errorf("account %s is %s, handle can only change while pending", did, ent.Status)
+	}
+	signingKey, err := m.keys.SigningKey(did)
+	if err != nil {
+		return nil, err
+	}
+	pub, err := signingKey.PublicKey()
+	if err != nil {
+		return nil, err
+	}
+	opCID, err := m.plc.UpdateHandle(ctx, did, pub.DIDKey(), ent.PLCLastOpCID, newHandle)
+	if err != nil {
+		return nil, fmt.Errorf("plc handle update failed: %w", err)
+	}
+	if err := m.db.Model(&store.Entity{}).Where("uid = ?", ent.Uid).
+		Updates(map[string]any{"handle": newHandle, "plc_last_op_cid": opCID}).Error; err != nil {
+		return nil, err
+	}
+	ent.Handle = newHandle
+	ent.PLCLastOpCID = opCID
+	return ent, nil
+}
+
 // Activate turns a pending account live: it waits for the DID to resolve on
 // the PLC directory, then emits #identity → #account → the initial #commit
 // (repo init) in that order. Relays validate the DID before accepting
