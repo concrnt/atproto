@@ -39,9 +39,12 @@ type HandleResolver interface {
 
 // indigoResolver adapts indigo's identity directory. It is uncached: handle
 // verification must see the DNS TXT the user just set, not a stale/negative
-// cache entry.
+// cache entry. It is also one-directional (DNS/well-known → DID only):
+// LookupHandle would additionally require the PLC document to already
+// declare the handle, which is never true while an active account is moving
+// to a new domain. The caller compares the DID itself.
 type indigoResolver struct {
-	dir identity.Directory
+	dir *identity.BaseDirectory
 }
 
 func (r indigoResolver) ResolveHandle(ctx context.Context, handle string) (string, error) {
@@ -49,11 +52,15 @@ func (r indigoResolver) ResolveHandle(ctx context.Context, handle string) (strin
 	if err != nil {
 		return "", err
 	}
-	ident, err := r.dir.LookupHandle(ctx, h)
+	did, err := r.dir.ResolveHandle(ctx, h)
 	if err != nil {
 		return "", err
 	}
-	return ident.DID.String(), nil
+	// indigo returns ("", nil) when DNS was skipped and well-known 404s.
+	if did == "" {
+		return "", fmt.Errorf("%w: %s", identity.ErrHandleNotFound, handle)
+	}
+	return did.String(), nil
 }
 
 type Server struct {
@@ -88,12 +95,11 @@ type PostImporter interface {
 }
 
 func NewServer(db *gorm.DB, repos *repoman.Manager, av *appview.Client, pdsHost string, relays []string, version string, serviceCcid string) *Server {
-	base := identity.BaseDirectory{}
 	return &Server{
 		db:          db,
 		repos:       repos,
 		appview:     av,
-		resolver:    indigoResolver{dir: &base},
+		resolver:    indigoResolver{dir: &identity.BaseDirectory{}},
 		pdsHost:     pdsHost,
 		relays:      relays,
 		version:     version,
