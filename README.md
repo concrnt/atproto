@@ -200,6 +200,12 @@ services:
 > 接続してきた購読者(= relay の初回接続)には active な全アカウントの `#identity`/`#account`
 > を再送します(1分に1回まで)。手動のやり直しは `POST /atproto/api/announce` です。
 >
+> **ハンドルの変更**: active なアカウントは `POST /atproto/api/change-handle`
+> (`{"handle":"new.example.com"}`)で同じ DID のまま別ドメインへ移せます。新ドメインの
+> `_atproto` TXT / well-known が現在の DID に解決できることを先に検証し、通れば PLC の
+> alsoKnownAs を更新して `#identity` を流します(リポジトリ・鍵は不変)。pending 中は
+> `setup` を別ハンドルで再 POST してください。
+>
 > **firehose(WebSocket)**は concrnt ゲートウェイの ReverseProxy を通ります。
 > Go の ReverseProxy は Upgrade を透過しますが、本体は WS プロキシの実績が
 > ないため、デプロイ時に `wss://<concrnt>/xrpc/com.atproto.sync.subscribeRepos`

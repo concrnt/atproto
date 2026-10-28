@@ -372,6 +372,43 @@ func (m *Manager) ChangePendingHandle(ctx context.Context, did, newHandle string
 	return ent, nil
 }
 
+// ChangeHandle re-points an active account at a new domain: a PLC update op
+// replacing alsoKnownAs on the same DID, the row, then an #identity event so
+// relays and the appview re-resolve the handle. The caller must have checked
+// that newHandle already resolves to did, otherwise the account would show
+// as handle.invalid until it does.
+func (m *Manager) ChangeHandle(ctx context.Context, did, newHandle string) (*store.Entity, error) {
+	ent, err := m.entityByDID(did)
+	if err != nil {
+		return nil, err
+	}
+	if ent.Status != "active" {
+		return nil, fmt.Errorf("account %s is %s, not active", did, ent.Status)
+	}
+	signingKey, err := m.keys.SigningKey(did)
+	if err != nil {
+		return nil, err
+	}
+	pub, err := signingKey.PublicKey()
+	if err != nil {
+		return nil, err
+	}
+	opCID, err := m.plc.UpdateHandle(ctx, did, pub.DIDKey(), ent.PLCLastOpCID, newHandle)
+	if err != nil {
+		return nil, fmt.Errorf("plc handle update failed: %w", err)
+	}
+	if err := m.db.Model(&store.Entity{}).Where("uid = ?", ent.Uid).
+		Updates(map[string]any{"handle": newHandle, "plc_last_op_cid": opCID}).Error; err != nil {
+		return nil, err
+	}
+	ent.Handle = newHandle
+	ent.PLCLastOpCID = opCID
+	if err := m.EmitIdentity(ctx, did, newHandle); err != nil {
+		return nil, err
+	}
+	return ent, nil
+}
+
 // Activate turns a pending account live: it waits for the DID to resolve on
 // the PLC directory, then emits #identity → #account → the initial #commit
 // (repo init) in that order. Relays validate the DID before accepting
@@ -393,6 +430,17 @@ func (m *Manager) Activate(ctx context.Context, did string) error {
 	}
 	if err := m.EmitAccount(ctx, did, true, nil); err != nil {
 		return err
+	}
+	// InitNewActor commits a fresh empty repo on top of whatever the user
+	// already has, so an account that was flipped back to pending (e.g. by
+	// hand in the DB) must not lose its records on re-activation.
+	head, err := m.cs.GetUserRepoHead(ctx, ent.Uid)
+	if err != nil {
+		return err
+	}
+	if head.Defined() {
+		return m.db.Model(&store.Entity{}).Where("uid = ?", ent.Uid).
+			Update("status", "active").Error
 	}
 	if err := m.mgr.InitNewActor(ctx, ent.Uid, ent.Handle, did, "", "", ""); err != nil {
 		return fmt.Errorf("repo init failed: %w", err)

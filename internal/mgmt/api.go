@@ -121,6 +121,7 @@ func (s *Server) Register(e *echo.Echo) {
 	e.POST("/atproto/api/setup", s.handleSetup)
 	e.POST("/atproto/api/verify", s.handleVerify)
 	e.POST("/atproto/api/announce", s.handleAnnounce)
+	e.POST("/atproto/api/change-handle", s.handleChangeHandle)
 	e.GET("/atproto/api/following", s.handleFollowing)
 	e.GET("/atproto/api/followers", s.handleFollowers)
 	e.GET("/atproto/api/resolve-actor", s.handleResolveActor)
@@ -160,6 +161,7 @@ func (s *Server) handleCCInfo(c echo.Context) error {
 			ServiceName + ".setup":        "/atproto/api/setup",
 			ServiceName + ".verify":       "/atproto/api/verify",
 			ServiceName + ".announce":     "/atproto/api/announce",
+			ServiceName + ".changeHandle": "/atproto/api/change-handle",
 			ServiceName + ".following":    "/atproto/api/following",
 			ServiceName + ".followers":    "/atproto/api/followers{?limit,cursor}",
 			ServiceName + ".resolveActor": "/atproto/api/resolve-actor{?target}",
@@ -399,6 +401,65 @@ func (s *Server) handleVerify(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{"did": ent.DID, "handle": ent.Handle, "status": "active"})
+}
+
+// handleChangeHandle moves an active account to a new domain. The new
+// handle must already resolve to the caller's DID (DNS TXT / well-known with
+// the unchanged did= value): only then is the PLC alsoKnownAs updated and
+// #identity emitted, so the account never sits on an unverifiable handle.
+// The repo, DID and keys are untouched.
+func (s *Server) handleChangeHandle(c echo.Context) error {
+	ent, herr := s.entityOfRequester(c)
+	if ent == nil {
+		return herr
+	}
+	if ent.Status != "active" {
+		return c.JSON(http.StatusConflict, map[string]string{"error": "account is not active; call verify first"})
+	}
+
+	var body struct {
+		Handle string `json:"handle"`
+	}
+	if err := c.Bind(&body); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid body"})
+	}
+	handle := strings.ToLower(strings.TrimSpace(body.Handle))
+	handle = strings.TrimPrefix(handle, "@")
+	if _, err := syntax.ParseHandle(handle); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{
+			"error": "handle must be a domain you control (e.g. alice.example.com)",
+		})
+	}
+	if handle == ent.Handle {
+		return c.JSON(http.StatusOK, map[string]any{"did": ent.DID, "handle": ent.Handle, "status": ent.Status})
+	}
+	var count int64
+	s.db.Model(&store.Entity{}).Where("handle = ? AND uid <> ?", handle, ent.Uid).Count(&count)
+	if count > 0 {
+		return c.JSON(http.StatusConflict, map[string]string{"error": "handle already taken"})
+	}
+
+	ctx := c.Request().Context()
+	resolved, err := s.resolver.ResolveHandle(ctx, handle)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]any{
+			"error":  "handle_not_resolvable",
+			"detail": fmt.Sprintf("could not resolve %s: %v", handle, err),
+			"hint":   "add the _atproto DNS TXT record (or well-known) for the new domain and retry; DNS may take a few minutes",
+		})
+	}
+	if resolved != ent.DID {
+		return c.JSON(http.StatusBadRequest, map[string]any{
+			"error":  "did_mismatch",
+			"detail": fmt.Sprintf("%s resolves to %s, expected %s", handle, resolved, ent.DID),
+		})
+	}
+
+	changed, err := s.repos.ChangeHandle(ctx, ent.DID, handle)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	return c.JSON(http.StatusOK, map[string]any{"did": changed.DID, "handle": changed.Handle, "status": changed.Status})
 }
 
 // handleAnnounce re-pushes everything the network should know about the
