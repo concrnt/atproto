@@ -32,7 +32,7 @@ require (
 	cosmossdk.io/log v1.3.1 // indirect
 	cosmossdk.io/math v1.3.0 // indirect
 	cosmossdk.io/store v1.1.0 // indirect
-	cosmossdk.io/x/tx v0.13.3 // indirect
+	cosmossdk.io/x/tx v0.13.7 // indirect
 	filippo.io/edwards25519 v1.1.1 // indirect
 	github.com/DataDog/zstd v1.5.5 // indirect
 	github.com/ProjectZKM/Ziren/crates/go-runtime/zkvm_runtime v0.0.0-20251001021608-1fe7b43fc4d6 // indirect
@@ -53,7 +53,7 @@ require (
 	github.com/cosmos/cosmos-db v1.0.2 // indirect
 	github.com/cosmos/cosmos-proto v1.0.0-beta.5 // indirect
 	github.com/cosmos/cosmos-sdk v0.50.7 // indirect
-	github.com/cosmos/gogoproto v1.4.12 // indirect
+	github.com/cosmos/gogoproto v1.7.0 // indirect
 	github.com/cosmos/ics23/go v0.10.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 // indirect
