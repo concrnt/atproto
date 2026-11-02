@@ -139,8 +139,8 @@ github.com/cometbft/cometbft v0.38.21 h1:qcIJSH9LiwU5s6ZgKR5eRbsLNucbubfraDs5bzg
 github.com/cometbft/cometbft v0.38.21/go.mod h1:UCu8dlHqvkAsmAFmWDRWNZJPlu6ya2fTWZlDrWsivwo=
 github.com/cometbft/cometbft-db v0.14.1 h1:SxoamPghqICBAIcGpleHbmoPqy+crij/++eZz3DlerQ=
 github.com/cometbft/cometbft-db v0.14.1/go.mod h1:KHP1YghilyGV/xjD5DP3+2hyigWx0WTp9X+0Gnx0RxQ=
-github.com/concrnt/concrnt v1.11.9 h1:fua/ix0RnJSGmabEYXlJIMI/uMiaxaWS6r/pn1Tijks=
-github.com/concrnt/concrnt v1.11.9/go.mod h1:g08ZEx8ZWh7RITaq76/FT8TfO4ftPKC2mQS7UpABhc4=
+github.com/concrnt/concrnt v1.11.10 h1:DpcHSoCdfHc7HlBepehjyxrV/wd0kFY2eSWou7XQCEQ=
+github.com/concrnt/concrnt v1.11.10/go.mod h1:g08ZEx8ZWh7RITaq76/FT8TfO4ftPKC2mQS7UpABhc4=
 github.com/coreos/go-semver v0.3.0/go.mod h1:nnelYz7RCh+5ahJtPPxZlU+153eP4D4r3EedlOD2RNk=
 github.com/coreos/go-systemd/v22 v22.3.2/go.mod h1:Y58oyj3AT4RCenI/lSvhwexgC+NSVTIJ3seZv2GcEnc=
 github.com/coreos/go-systemd/v22 v22.5.0/go.mod h1:Y58oyj3AT4RCenI/lSvhwexgC+NSVTIJ3seZv2GcEnc=
