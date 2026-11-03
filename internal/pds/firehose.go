@@ -103,7 +103,11 @@ func (s *Server) handleSubscribeRepos(c echo.Context) error {
 	}
 	defer cleanup()
 
-	slog.Info("new firehose consumer", "remote", c.RealIP(), "ua", c.Request().UserAgent(), "cursor", since)
+	cursorAttr := slog.Any("cursor", nil)
+	if since != nil {
+		cursorAttr = slog.Int64("cursor", *since)
+	}
+	slog.Info("new firehose consumer", "remote", c.RealIP(), "ua", c.Request().UserAgent(), cursorAttr)
 
 	// A cursor-less consumer starts at the live position and has no way to
 	// learn about accounts whose events it missed; announce them now that
