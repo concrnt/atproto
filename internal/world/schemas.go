@@ -40,15 +40,20 @@ const (
 
 // Body-bearing message value shared by markdown/media/reply/reroute schemas.
 type MessageValue struct {
-	Body     string            `json:"body"`
-	Title    *string           `json:"title,omitempty"`
-	Details  *string           `json:"details,omitempty"`
-	Emojis   map[string]string `json:"emojis,omitempty"`
-	Medias   []Media           `json:"medias,omitempty"`
-	Mentions []string          `json:"mentions,omitempty"`
+	Body     string           `json:"body"`
+	Title    *string          `json:"title,omitempty"`
+	Details  *string          `json:"details,omitempty"`
+	Emojis   map[string]Emoji `json:"emojis,omitempty"`
+	Medias   []Media          `json:"medias,omitempty"`
+	Mentions []string         `json:"mentions,omitempty"`
 	// reply / reroute
 	TargetURI       string           `json:"targetURI,omitempty"`
 	ProfileOverride *ProfileOverride `json:"profileOverride,omitempty"`
+}
+
+type Emoji struct {
+	ImageURL string `json:"imageURL,omitempty"`
+	AnimURL  string `json:"animURL,omitempty"`
 }
 
 type Media struct {
