@@ -63,6 +63,7 @@ type Atproto struct {
 	// keyEncryptionKey, so no extra secret has to be provisioned.
 	SessionSecret            string `yaml:"sessionSecret"`
 	DisableRelayNotify       bool   `yaml:"disableRelayNotify"`
+	RelayWatchIntervalMins   int    `yaml:"relayWatchIntervalMinutes"`
 	FirehoseRetentionHours   int    `yaml:"firehoseRetentionHours"`
 	ActorCacheTTLMinutes     int    `yaml:"actorCacheTtlMinutes"`
 	EntityReloadIntervalSecs int    `yaml:"entityReloadIntervalSeconds"`
@@ -152,6 +153,9 @@ func Load(path string) (*Config, error) {
 	}
 	if c.Atproto.FirehoseRetentionHours == 0 {
 		c.Atproto.FirehoseRetentionHours = 72
+	}
+	if c.Atproto.RelayWatchIntervalMins == 0 {
+		c.Atproto.RelayWatchIntervalMins = 10
 	}
 	if c.Atproto.ActorCacheTTLMinutes == 0 {
 		c.Atproto.ActorCacheTTLMinutes = 60

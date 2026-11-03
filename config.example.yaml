@@ -44,7 +44,8 @@ atproto:
   # firehoseRetentionHours: 72
   # actorCacheTtlMinutes: 60
   # entityReloadIntervalSeconds: 60
-  # disableRelayNotify: false
+  # disableRelayNotify: false       # also turns off the relay watchdog below
+  # relayWatchIntervalMinutes: 10   # re-crawl relays that report this host as not subscribed
   # Media processing on ingest. ffmpeg/ffprobe are looked up on PATH (the
   # Docker image bundles static builds). Videos that are not already an
   # H.264/AAC mp4 are re-encoded. Images (any image/* ffmpeg can decode,

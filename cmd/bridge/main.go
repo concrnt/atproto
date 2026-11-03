@@ -250,6 +250,8 @@ func run() error {
 		if count > 0 {
 			go relay.RequestCrawl(ctx, cfg.Atproto.Relays, pdsHost)
 		}
+		go relay.Watch(ctx, cfg.Atproto.Relays, pdsHost,
+			time.Duration(cfg.Atproto.RelayWatchIntervalMins)*time.Minute, repos.AnnounceAllActive)
 	}
 
 	<-ctx.Done()

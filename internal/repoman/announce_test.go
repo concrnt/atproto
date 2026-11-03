@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	comatproto "github.com/bluesky-social/indigo/api/atproto"
 	appbsky "github.com/bluesky-social/indigo/api/bsky"
+	atrepo "github.com/bluesky-social/indigo/atproto/repo"
 	"github.com/bluesky-social/indigo/events"
 	"github.com/bluesky-social/indigo/repo"
 )
@@ -267,5 +269,72 @@ func TestFirehoseSequenceNumbersIncreaseAcrossRestart(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out on playback")
+	}
+}
+
+// The #sync in an announce must pass the checks an indigo relay applies
+// (VerifyRepoSync): a CAR whose root is the signed head commit, with the
+// event's did/rev matching the commit.
+func TestAnnounceEmitsVerifiableSync(t *testing.T) {
+	ctx := context.Background()
+	m, _ := newTestManager(t)
+	did := activate(t, m, "con1sync", "sync.test.example")
+	post := &appbsky.FeedPost{LexiconTypeID: "app.bsky.feed.post", Text: "p", CreatedAt: "2026-07-20T00:00:00.000Z"}
+	if _, _, err := m.CreateRecord(ctx, did, "app.bsky.feed.post", post); err != nil {
+		t.Fatal(err)
+	}
+
+	evts, cancel, err := m.Events().Subscribe(ctx, "test", func(*events.XRPCStreamEvent) bool { return true }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	if err := m.AnnounceAccount(ctx, did); err != nil {
+		t.Fatal(err)
+	}
+
+	var sync *comatproto.SyncSubscribeRepos_Sync
+	deadline := time.After(5 * time.Second)
+	for sync == nil {
+		select {
+		case evt := <-evts:
+			sync = evt.RepoSync
+		case <-deadline:
+			t.Fatal("timed out waiting for #sync")
+		}
+	}
+
+	commit, commitCID, err := atrepo.LoadCommitFromCAR(ctx, bytes.NewReader(sync.Blocks))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev, err := m.Rev(ctx, did)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sync.Did != did || commit.DID != did || sync.Rev != rev || commit.Rev != rev {
+		t.Fatalf("sync did=%s rev=%s, commit did=%s rev=%s, want %s %s", sync.Did, sync.Rev, commit.DID, commit.Rev, did, rev)
+	}
+	ent, err := m.entityByDID(did)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := m.cs.GetUserRepoHead(ctx, ent.Uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *commitCID != head {
+		t.Fatalf("sync root %s, want head %s", commitCID, head)
+	}
+	priv, err := m.keys.SigningKey(did)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := priv.PublicKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := commit.VerifySignature(pub); err != nil {
+		t.Fatalf("sync commit signature: %v", err)
 	}
 }

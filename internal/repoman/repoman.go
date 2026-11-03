@@ -4,6 +4,7 @@
 package repoman
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -118,6 +119,10 @@ func (m *Manager) Close(ctx context.Context) error {
 func (m *Manager) addEvent(ctx context.Context, evt *events.XRPCStreamEvent) error {
 	m.seqMu.Lock()
 	defer m.seqMu.Unlock()
+	return m.addEventLocked(ctx, evt)
+}
+
+func (m *Manager) addEventLocked(ctx context.Context, evt *events.XRPCStreamEvent) error {
 	m.seq++
 	switch {
 	case evt.RepoCommit != nil:
@@ -244,10 +249,53 @@ func (m *Manager) EmitAccount(ctx context.Context, did string, active bool, stat
 	})
 }
 
-// AnnounceAccount re-broadcasts #identity and #account for an active account.
-// Relays and the appview only learn about an account from firehose events,
-// so this is how a consumer that missed the activation events (or whose
-// handle verification failed at the time) gets told again.
+// EmitSync broadcasts a #sync event carrying the current signed commit.
+// Consumers whose copy of the repo differs refetch it whole, which is how
+// commits that aged out of the firehose window before a relay read them
+// still reach the network.
+func (m *Manager) EmitSync(ctx context.Context, uid models.Uid, did string) error {
+	// Read the head under seqMu so a concurrent commit cannot be sequenced
+	// ahead of a #sync that still points at the older revision.
+	m.seqMu.Lock()
+	defer m.seqMu.Unlock()
+	head, err := m.cs.GetUserRepoHead(ctx, uid)
+	if err != nil {
+		return err
+	}
+	rev, err := m.cs.GetUserRepoRev(ctx, uid)
+	if err != nil {
+		return err
+	}
+	ds, err := m.cs.ReadOnlySession(uid)
+	if err != nil {
+		return err
+	}
+	blk, err := ds.Get(ctx, head)
+	if err != nil {
+		return err
+	}
+	var buf bytes.Buffer
+	if _, err := carstore.WriteCarHeader(&buf, head); err != nil {
+		return err
+	}
+	if _, err := carstore.LdWrite(&buf, head.Bytes(), blk.RawData()); err != nil {
+		return err
+	}
+	return m.addEventLocked(ctx, &events.XRPCStreamEvent{
+		RepoSync: &comatproto.SyncSubscribeRepos_Sync{
+			Did:    did,
+			Rev:    rev,
+			Blocks: buf.Bytes(),
+			Time:   time.Now().UTC().Format(util.ISO8601),
+		},
+		PrivUid: uid,
+	})
+}
+
+// AnnounceAccount re-broadcasts #identity, #account and #sync for an active
+// account. Relays and the appview only learn about an account from firehose
+// events, so this is how a consumer that missed the activation events, the
+// handle verification, or commits gets told again.
 func (m *Manager) AnnounceAccount(ctx context.Context, did string) error {
 	ent, err := m.entityByDID(did)
 	if err != nil {
@@ -256,13 +304,20 @@ func (m *Manager) AnnounceAccount(ctx context.Context, did string) error {
 	if ent.Status != "active" {
 		return fmt.Errorf("account %s is not active", did)
 	}
-	if err := m.EmitIdentity(ctx, did, ent.Handle); err != nil {
-		return err
-	}
-	return m.EmitAccount(ctx, did, true, nil)
+	return m.announce(ctx, ent)
 }
 
-// AnnounceActiveAccounts re-broadcasts #identity/#account for every active
+func (m *Manager) announce(ctx context.Context, ent *store.Entity) error {
+	if err := m.EmitIdentity(ctx, ent.DID, ent.Handle); err != nil {
+		return err
+	}
+	if err := m.EmitAccount(ctx, ent.DID, true, nil); err != nil {
+		return err
+	}
+	return m.EmitSync(ctx, ent.Uid, ent.DID)
+}
+
+// AnnounceActiveAccounts re-broadcasts #identity/#account/#sync for every active
 // account, throttled to once per announceInterval. It is called when a
 // firehose consumer connects without a cursor: a newly subscribed relay
 // starts at the live position and never backfills, so events emitted
@@ -277,16 +332,18 @@ func (m *Manager) AnnounceActiveAccounts(ctx context.Context) (int, error) {
 	}
 	m.lastAnnounce = time.Now()
 	m.announceMu.Unlock()
+	return m.AnnounceAllActive(ctx)
+}
 
+// AnnounceAllActive is AnnounceActiveAccounts without the throttle, for
+// callers that already know a consumer is out of date.
+func (m *Manager) AnnounceAllActive(ctx context.Context) (int, error) {
 	var ents []store.Entity
 	if err := m.db.Where("status = ? AND did <> ''", "active").Find(&ents).Error; err != nil {
 		return 0, err
 	}
-	for _, ent := range ents {
-		if err := m.EmitIdentity(ctx, ent.DID, ent.Handle); err != nil {
-			return 0, err
-		}
-		if err := m.EmitAccount(ctx, ent.DID, true, nil); err != nil {
+	for i := range ents {
+		if err := m.announce(ctx, &ents[i]); err != nil {
 			return 0, err
 		}
 	}
